@@ -31,3 +31,4 @@ docx_extract/
 build/
 dist/
 *.egg-info/
+akebia/
