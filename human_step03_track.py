@@ -1,6 +1,7 @@
 """Human Step 03：正向峰值检测与匈牙利轨迹追踪。
 
 Input:
+    human_dcm/step01_bandpass/human_filtered.npy
     human_dcm/step02_gaussian_filter/human_smoothed.npy
     human_dcm/step00_preprocess/metadata.json
 
@@ -13,7 +14,8 @@ Output:
     human_dcm/step03_track/tracking_summary.txt
 
 算法说明:
-    本 step 只负责构建正向检测响应、峰值检测和匈牙利轨迹追踪。
+    本 step 只负责 Akebia human 式局部极大值检测和匈牙利轨迹追踪：
+    用 Step 02 的 Gaussian guide 找局部极大值位置，用 Step 01 原始 bandpass 帧取强度并做阈值。
     高/低速分组、密度图和指标计算全部放在 Human Step 04。
 """
 
@@ -35,7 +37,7 @@ DEFAULT_PREVIEW_FRAME = 300
 
 
 def build_detection_response(frame: np.ndarray) -> np.ndarray:
-    """只保留 signed Gaussian 图中的正向波动，构建非负检测响应图。"""
+    """只保留 signed bandpass 图中的正向波动，构建非负检测响应图。"""
 
     return np.maximum(frame, 0.0).astype(np.float32)
 
@@ -48,20 +50,32 @@ def resolve_preview_frame_id(n_frames: int, requested: int = DEFAULT_PREVIEW_FRA
     return n_frames // 2
 
 
-def detect_frame(frame: np.ndarray, frame_id: int, metadata: dict) -> list[dict[str, float | int | str]]:
-    """在 Step 03 内将 signed 平滑图转换为正向检测响应图，再检测局部峰值。"""
+def detect_frame(
+    frame: np.ndarray,
+    smooth_guide: np.ndarray,
+    frame_id: int,
+    metadata: dict,
+) -> list[dict[str, float | int | str]]:
+    """用平滑帧找峰位置，再用原始 bandpass 帧取强度并筛选。
+
+    对应 Akebia human:
+      isABubble = imregionalmax(imgaussfilt(frame, sigma)) .* frame;
+      isABubble = (isABubble >= threshold);
+    """
 
     response = build_detection_response(frame)
-    threshold = float(response.mean() + config.PEAK_THRESHOLD_STD * response.std())
+    threshold = float(response.mean() + config.HUMAN_PEAK_THRESHOLD_STD * response.std())
     peaks = peak_local_max(
-        response,
-        min_distance=config.PEAK_MIN_DISTANCE,
-        threshold_abs=threshold,
+        smooth_guide,
+        min_distance=config.HUMAN_LOCAL_MAX_MIN_DISTANCE,
+        threshold_abs=None,
         exclude_border=False,
     )
 
     rows: list[dict[str, float | int | str]] = []
     for y, x in peaks:
+        if response[y, x] < threshold:
+            continue
         rows.append(
             {
                 "frame_id": frame_id,
@@ -71,7 +85,8 @@ def detect_frame(frame: np.ndarray, frame_id: int, metadata: dict) -> list[dict[
                 "y_physical": float(y) * float(metadata["pixel_size_y"]),
                 "response_intensity": float(response[y, x]),
                 "signed_intensity": float(frame[y, x]),
-                "method": "positive_signed_gaussian_peak",
+                "intensity": float(smooth_guide[y, x]),
+                "method": "akebia_human_gaussian_localmax",
             }
         )
     return rows
@@ -79,17 +94,22 @@ def detect_frame(frame: np.ndarray, frame_id: int, metadata: dict) -> list[dict[
 
 def detect_bubbles(
     frames_path: Path,
+    smooth_frames_path: Path,
     metadata: dict,
     output_csv: Path,
     output_dir: Path,
     preview_frame: int = DEFAULT_PREVIEW_FRAME,
 ) -> Path:
-    """读取 signed smoothed 帧，写出正向峰值检测 CSV 和中间帧预览图。"""
+    """读取 bandpass 帧和平滑 guide，写出 Akebia human 式检测 CSV 和预览图。"""
 
     frames = ulm_io.load_frames(frames_path)
+    smooth_frames = ulm_io.load_frames(smooth_frames_path)
+    if smooth_frames.shape != frames.shape:
+        raise ValueError(f"smooth guide shape {smooth_frames.shape} must match frames shape {frames.shape}")
+
     rows: list[dict[str, float | int | str]] = []
     for frame_id in range(frames.shape[0]):
-        rows.extend(detect_frame(frames[frame_id], frame_id, metadata))
+        rows.extend(detect_frame(frames[frame_id], smooth_frames[frame_id], frame_id, metadata))
 
     detections_csv = write_detections(rows, output_csv)
     preview_frame_id = resolve_preview_frame_id(frames.shape[0], preview_frame)
@@ -138,19 +158,22 @@ def detect_bubbles(
 
 def run(
     frames_path: Path | None = None,
+    smooth_frames_path: Path | None = None,
     metadata_path: Path | None = None,
     output_dir: Path | None = None,
     preview_frame: int = DEFAULT_PREVIEW_FRAME,
 ) -> dict[str, Path]:
-    """运行 Human Step 03：正向峰值检测后进行匈牙利轨迹追踪。"""
+    """运行 Human Step 03：Akebia human 式检测后进行匈牙利轨迹追踪。"""
 
-    frames_path = frames_path or (ulm_io.step_dir("human", "step02_gaussian_filter") / "human_smoothed.npy")
+    frames_path = frames_path or (ulm_io.step_dir("human", "step01_bandpass") / "human_filtered.npy")
+    smooth_frames_path = smooth_frames_path or (ulm_io.step_dir("human", "step02_gaussian_filter") / "human_smoothed.npy")
     metadata_path = metadata_path or ulm_io.default_metadata_path("human")
     output_dir = output_dir or ulm_io.step_dir("human", "step03_track")
     metadata = ulm_io.load_metadata(metadata_path)
 
     detections_csv = detect_bubbles(
         frames_path,
+        smooth_frames_path,
         metadata,
         output_dir / "human_detections.csv",
         output_dir,
@@ -168,6 +191,7 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="Human Step 03: 正向峰值检测与轨迹追踪")
     parser.add_argument("--frames", type=Path, default=None)
+    parser.add_argument("--smooth-frames", type=Path, default=None)
     parser.add_argument("--metadata", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--preview-frame", type=int, default=DEFAULT_PREVIEW_FRAME)
@@ -176,4 +200,4 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    run(args.frames, args.metadata, args.output_dir, args.preview_frame)
+    run(args.frames, args.smooth_frames, args.metadata, args.output_dir, args.preview_frame)

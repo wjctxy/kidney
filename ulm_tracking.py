@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
+from tqdm import tqdm
 
 import ulm_config as config
 
@@ -47,6 +48,8 @@ METRIC_FIELDS = [
     "point_count",
     "duration_s",
     "path_length",
+    "mean_displacement_px_per_frame",
+    "track_enclosed_area_pixels",
     "straight_distance",
     "normalized_distance",
     "dwell_time_s",
@@ -64,6 +67,8 @@ class Track:
     track_id: int
     points: list[dict[str, float | int | str]] = field(default_factory=list)
     missing: int = 0
+    killed: bool = False                # True 表示该轨迹因 missing 超限被杀死（Akebia unmatched source）
+    started_from_unmatched: bool = False  # True 表示该轨迹始于匈牙利未匹配的孤儿点（Akebia unmatched target）
 
     @property
     def last(self) -> dict[str, float | int | str]:
@@ -183,7 +188,7 @@ def _track_detections(
     finished: list[Track] = []
     next_id = 1
 
-    for frame_id in sorted(detections):
+    for frame_id in tqdm(sorted(detections), desc="tracking", unit="frame"):
         points = detections[frame_id]
         assigned_tracks, assigned_points = _assign(active, points)
 
@@ -204,6 +209,7 @@ def _track_detections(
             if track.missing <= config.MAX_MISSING_FRAMES:
                 still_active.append(track)
             else:
+                track.killed = True  # Akebia 式：被匈牙利遗漏导致死亡
                 finished.append(track)
         active = still_active
 
@@ -212,11 +218,103 @@ def _track_detections(
                 continue
             point["velocity"] = 0.0
             point["time_s"] = float(point["frame_id"]) / float(metadata["fps"])
-            active.append(Track(next_id, [point]))
+            new_track = Track(next_id, [point])
+            new_track.started_from_unmatched = True  # Akebia unmatched target
+            active.append(new_track)
             next_id += 1
 
     finished.extend(active)
+
+    # ── Akebia 式 gap-closing：只对被杀的尾 ↔ 孤儿头做跨帧桥接 ──
+    if getattr(config, 'MAX_GAP_CLOSING_FRAMES', 0) > 0:
+        finished = _gap_closing_merge(finished)
+
     return [track for track in finished if len(track.points) >= config.MIN_TRACK_LENGTH]
+
+
+def _gap_closing_merge(tracks: list[Track]) -> list[Track]:
+    """Akebia 式 gap-closing：只对被匈牙利遗漏杀死的 track 尾端与孤儿起始 track 头端做最近邻桥接。"""
+
+    max_gap = int(getattr(config, 'MAX_GAP_CLOSING_FRAMES', 0))
+    if max_gap <= 0 or len(tracks) <= 1:
+        return tracks
+
+    # 收集被杀轨迹尾端 (unmatched sources) 和孤儿轨迹头端 (unmatched targets)
+    killed_tails: list[dict] = []
+    orphan_heads: list[dict] = []
+    for idx, track in enumerate(tracks):
+        if len(track.points) == 0:
+            continue
+        if track.killed:
+            end_pt = track.points[-1]
+            killed_tails.append({
+                "track_idx": idx,
+                "frame_id": int(end_pt["frame_id"]),
+                "x_pixel": float(end_pt["x_pixel"]),
+                "y_pixel": float(end_pt["y_pixel"]),
+            })
+        if track.started_from_unmatched:
+            start_pt = track.points[0]
+            orphan_heads.append({
+                "track_idx": idx,
+                "frame_id": int(start_pt["frame_id"]),
+                "x_pixel": float(start_pt["x_pixel"]),
+                "y_pixel": float(start_pt["y_pixel"]),
+            })
+
+    if not killed_tails or not orphan_heads:
+        return tracks
+
+    # 对 orphan_heads 按 frame_id 建索引，只查 in-range 帧，避免 O(killed×all_orphans)
+    heads_by_frame: dict[int, list[dict]] = {}
+    for head in orphan_heads:
+        heads_by_frame.setdefault(head["frame_id"], []).append(head)
+
+    max_dist = float(config.MAX_FRAME_DISPLACEMENT_PX)
+    merged = list(tracks)
+    used_heads: set[int] = set()  # Akebia 式：已用头不得重复桥接
+
+    for tail in sorted(killed_tails, key=lambda t: t["frame_id"]):
+        candidates = []
+        # 只查 tail.frame_id+1 到 tail.frame_id+max_gap 的帧
+        for target_frame in range(tail["frame_id"] + 1, tail["frame_id"] + max_gap + 1):
+            for head in heads_by_frame.get(target_frame, []):
+                head_idx = head["track_idx"]
+                if head_idx in used_heads:
+                    continue
+                dist = math.hypot(head["x_pixel"] - tail["x_pixel"], head["y_pixel"] - tail["y_pixel"])
+                if dist <= max_dist:
+                    candidates.append((dist, head))
+
+        if not candidates:
+            continue
+
+        # 最近邻桥接
+        candidates.sort(key=lambda c: c[0])
+        best_head = candidates[0][1]
+        head_idx = best_head["track_idx"]
+
+        tail_track = merged[tail["track_idx"]]
+        head_track = merged[head_idx]
+        gap_frames = best_head["frame_id"] - tail["frame_id"] - 1
+
+        # 缺失帧补 NaN 占位
+        for offset in range(1, gap_frames + 1):
+            tail_track.points.append({
+                "frame_id": tail["frame_id"] + offset,
+                "time_s": 0.0,
+                "x_pixel": float('nan'),
+                "y_pixel": float('nan'),
+                "x_physical": float('nan'),
+                "y_physical": float('nan'),
+                "velocity": float('nan'),
+            })
+
+        tail_track.points.extend(head_track.points)
+        head_track.points = []
+        used_heads.add(head_idx)
+
+    return [t for t in merged if len(t.points) > 0]
 
 
 def _assign(active: list[Track], points: list[dict[str, float | int | str]]) -> tuple[list[int], list[int]]:
@@ -269,18 +367,59 @@ def _write_tracks(tracks: list[Track], path: str | Path) -> None:
 
 
 def _split_tracks_by_speed(tracks: list[Track]) -> tuple[list[Track], list[Track]]:
-    """按轨迹平均速度把轨迹分为低速组和高速组。"""
+    """按肾小球尺度把轨迹分为低速组和高速组。
+
+    平均位移超过一个肾小球直径的轨迹归为高速；平均位移不超过一个肾小球
+    直径的慢速候选，还必须满足轨迹包围盒面积不超过 15 个像素。
+    """
 
     low: list[Track] = []
     high: list[Track] = []
     for track in tracks:
-        velocities = [float(p["velocity"]) for p in track.points[1:]]
-        mean_velocity = float(np.mean(velocities)) if velocities else 0.0
-        if mean_velocity >= config.SPEED_THRESHOLD:
+        speed_group = _classify_track_speed_group(track)
+        if speed_group == "high":
             high.append(track)
-        else:
+        elif speed_group == "low":
             low.append(track)
     return low, high
+
+
+def _classify_track_speed_group(track: Track) -> str:
+    """返回 high、low 或 rejected_slow_size，用于 Step04 密度图和指标。"""
+
+    mean_displacement = _mean_displacement_px_per_frame(track.points)
+    enclosed_area = _track_enclosed_area_pixels(track.points)
+    if mean_displacement > config.GLOMERULUS_DIAMETER_PX:
+        return "high"
+    if enclosed_area > config.GLOMERULUS_MAX_ENCLOSED_AREA_PIXELS:
+        return "rejected_slow_size"
+    return "low"
+
+
+def _mean_displacement_px_per_frame(points: list[dict[str, float | int | str]]) -> float:
+    """计算轨迹相邻点平均像素位移，单位是 px/frame。"""
+
+    displacements: list[float] = []
+    for idx in range(1, len(points)):
+        frame_delta = int(points[idx]["frame_id"]) - int(points[idx - 1]["frame_id"])
+        if frame_delta <= 0:
+            continue
+        dx = float(points[idx]["x_pixel"]) - float(points[idx - 1]["x_pixel"])
+        dy = float(points[idx]["y_pixel"]) - float(points[idx - 1]["y_pixel"])
+        displacements.append(math.hypot(dx, dy) / frame_delta)
+    return float(np.mean(displacements)) if displacements else 0.0
+
+
+def _track_enclosed_area_pixels(points: list[dict[str, float | int | str]]) -> float:
+    """计算轨迹点像素包围盒面积，用于剔除过大的慢速路径。"""
+
+    xs = [float(point["x_pixel"]) for point in points]
+    ys = [float(point["y_pixel"]) for point in points]
+    if not xs or not ys:
+        return 0.0
+    width = max(xs) - min(xs) + 1.0
+    height = max(ys) - min(ys) + 1.0
+    return float(width * height)
 
 
 def _load_tracks_csv(path: str | Path) -> list[Track]:
@@ -348,15 +487,19 @@ def _write_density_maps(
 
 
 def _density_from_tracks(tracks: list[Track], shape: tuple[int, int]) -> np.ndarray:
-    """把轨迹点累计到超分辨率网格中，形成血流密度矩阵。"""
+    """把轨迹点累计到超分辨率网格中，形成血流密度矩阵（跳过 NaN 占位点）。"""
 
     h, w = shape
     scale = config.SUPER_RES_FACTOR
     density = np.zeros((h * scale, w * scale), dtype=np.float32)
-    for track in tracks:
+    for track in tqdm(tracks, desc="density from tracks", unit="track"):
         for point in track.points:
-            x = int(round(float(point["x_pixel"]) * scale))
-            y = int(round(float(point["y_pixel"]) * scale))
+            px = float(point["x_pixel"])
+            py = float(point["y_pixel"])
+            if np.isnan(px) or np.isnan(py):  # 跳过 gap-closing NaN 占位点
+                continue
+            x = int(round(px * scale))
+            y = int(round(py * scale))
             if 0 <= y < density.shape[0] and 0 <= x < density.shape[1]:
                 density[y, x] += 1.0
     if density.max() > 0:
@@ -401,11 +544,8 @@ def _compute_metrics(tracks: list[Track]) -> list[dict[str, float | int | str]]:
     """计算每条轨迹的长度、归一化距离、滞留时长、速度和离散度。"""
 
     rows: list[dict[str, float | int | str]] = []
-    low_tracks, high_tracks = _split_tracks_by_speed(tracks)
-    speed_group = {id(t): "low" for t in low_tracks}
-    speed_group.update({id(t): "high" for t in high_tracks})
 
-    for track in tracks:
+    for track in tqdm(tracks, desc="computing metrics", unit="track"):
         points = track.points
         distances = [
             math.hypot(
@@ -413,6 +553,12 @@ def _compute_metrics(tracks: list[Track]) -> list[dict[str, float | int | str]]:
                 float(points[i]["y_physical"]) - float(points[i - 1]["y_physical"]),
             )
             for i in range(1, len(points))
+            if not (
+                np.isnan(float(points[i]["x_physical"]))
+                or np.isnan(float(points[i]["y_physical"]))
+                or np.isnan(float(points[i - 1]["x_physical"]))
+                or np.isnan(float(points[i - 1]["y_physical"]))
+            )
         ]
         path_length = float(sum(distances))
         straight = float(
@@ -422,19 +568,23 @@ def _compute_metrics(tracks: list[Track]) -> list[dict[str, float | int | str]]:
             )
         )
         velocities = [float(p["velocity"]) for p in points[1:]]
+        mean_displacement = _mean_displacement_px_per_frame(points)
+        enclosed_area = _track_enclosed_area_pixels(points)
         rows.append(
             {
                 "track_id": track.track_id,
                 "point_count": len(points),
                 "duration_s": float(points[-1]["time_s"]) - float(points[0]["time_s"]),
                 "path_length": path_length,
+                "mean_displacement_px_per_frame": mean_displacement,
+                "track_enclosed_area_pixels": enclosed_area,
                 "straight_distance": straight,
                 "normalized_distance": path_length / straight if straight > 0 else 0.0,
                 "dwell_time_s": float(points[-1]["time_s"]) - float(points[0]["time_s"]),
                 "mean_velocity": float(np.mean(velocities)) if velocities else 0.0,
                 "max_velocity": float(np.max(velocities)) if velocities else 0.0,
                 "dispersion": _dispersion(points),
-                "speed_group": speed_group[id(track)],
+                "speed_group": _classify_track_speed_group(track),
             }
         )
     return rows
@@ -447,6 +597,8 @@ def _dispersion(points: list[dict[str, float | int | str]]) -> float:
     for idx in range(1, len(points)):
         dx = float(points[idx]["x_physical"]) - float(points[idx - 1]["x_physical"])
         dy = float(points[idx]["y_physical"]) - float(points[idx - 1]["y_physical"])
+        if np.isnan(dx) or np.isnan(dy):  # 跳过 gap-closing NaN
+            continue
         if dx == 0 and dy == 0:
             continue
         angles.append(math.degrees(math.atan2(dy, dx)))
@@ -474,11 +626,18 @@ def _write_summary(rows: list[dict[str, float | int | str]], path: str | Path) -
 
     low = [row for row in rows if row["speed_group"] == "low"]
     high = [row for row in rows if row["speed_group"] == "high"]
+    rejected = [row for row in rows if row["speed_group"] == "rejected_slow_size"]
     lines = [
         "ULM 轨迹指标摘要",
         f"total_tracks: {len(rows)}",
         f"low_speed_tracks: {len(low)}",
         f"high_speed_tracks: {len(high)}",
+        f"rejected_slow_size_tracks: {len(rejected)}",
+        f"low_speed_definition: mean_displacement_px_per_frame <= {config.GLOMERULUS_DIAMETER_PX}",
+        f"high_speed_definition: mean_displacement_px_per_frame > {config.GLOMERULUS_DIAMETER_PX}",
+        f"low_speed_max_enclosed_area_pixels: <= {config.GLOMERULUS_MAX_ENCLOSED_AREA_PIXELS}",
+        f"mean_displacement_px_per_frame: {_mean(rows, 'mean_displacement_px_per_frame'):.6f}",
+        f"mean_track_enclosed_area_pixels: {_mean(rows, 'track_enclosed_area_pixels'):.6f}",
         f"mean_velocity: {_mean(rows, 'mean_velocity'):.6f}",
         f"mean_normalized_distance: {_mean(rows, 'normalized_distance'):.6f}",
         f"mean_dwell_time_s: {_mean(rows, 'dwell_time_s'):.6f}",

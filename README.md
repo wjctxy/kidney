@@ -19,9 +19,9 @@ mouse_dcm/11.0.dcm
 所有算法 step 之间只传结构化数据：
 
 ```text
-step00_preprocess/frames.npy        float32 [T,H,W]，灰度、裁剪 ROI、归一化到 [0,1]
+step00_preprocess/frames.npy        float32 [T,H,W]，CEUS score/灰度、裁剪 ROI、归一化到 [0,1]
 step00_preprocess/metadata.json     fps、像素尺寸、ROI、帧数等元数据
-step02_gaussian_filter/*_smoothed.npy 高斯平滑后的帧序列
+step02_gaussian_filter/*_smoothed.npy Akebia 式局部极大值搜索用 Gaussian guide
 step03_track/*_detections.csv       每行一个微泡候选点
 step03_track/*tracks.csv              每行一个轨迹点
 step04_density_metrics/*metrics.csv   轨迹指标和密度图结果
@@ -44,7 +44,7 @@ human_dcm/step00_preprocess/metadata.json
 human_dcm/step00_preprocess/preview_frame_000.png
 ```
 
-`step0` 会读取 DICOM 中的超声区域标签，裁掉设备界面等冗余信息，再转灰度和归一化。
+`step0` 会读取 DICOM 中的超声区域标签，裁掉设备界面等冗余信息。彩色伪彩 CEUS 会转成橙黄色造影增强 score；单通道 DICOM 会按灰度强度归一化。
 
 ## 人类链路
 

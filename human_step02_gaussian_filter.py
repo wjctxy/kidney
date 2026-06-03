@@ -5,16 +5,15 @@ Input:
     human_dcm/step00_preprocess/metadata.json
 
 Output:
-    human_dcm/step02_gaussian_filter/human_smoothed.npy: signed float32 [T,H,W]
+    human_dcm/step02_gaussian_filter/human_smoothed.npy: signed float32 [T,H,W]，只作为局部极大值 guide
     human_dcm/step02_gaussian_filter/signed_smoothed_frame_XXXX.png
     human_dcm/step02_gaussian_filter/bandpass_vs_gaussian_frame_comparison.png
     human_dcm/step02_gaussian_filter/gaussian_stats.json
 
 算法说明:
-    本 step 对 Step 01 的 signed bandpass 输出逐帧做二维 Gaussian 空间平滑。
-    该步骤保留 signed 数值，不做 abs、不做 normalization、不做阈值检测。
-    平滑的目的是降低孤立像素噪声，使后续 Step 03 的候选点检测更稳定。
-    是否将 signed 信号转换为 non-negative detection map，由 Step 03 决定。
+    对齐 Akebia human 的 ULM_localization2D_interp.m：
+    高斯平滑只用于 imregionalmax/局部极大值搜索，不替代原始带通帧的强度。
+    Step 03 会用本 step 的 smoothed guide 找峰位置，再回到 Step 01 的 bandpass 帧取强度和做阈值。
 """
 
 from __future__ import annotations
@@ -33,9 +32,9 @@ from ulm_visualization import save_frame_png_raw_scale, save_signed_frame_compar
 
 
 def gaussian_smooth_frame(frame: np.ndarray) -> np.ndarray:
-    """对单帧 signed bandpass 结果做二维高斯平滑，保留正负号。"""
+    """对单帧 signed bandpass 结果做二维高斯平滑，作为 Akebia 式局部极大值 guide。"""
 
-    return gaussian_filter(frame, sigma=config.GAUSSIAN_SIGMA).astype(np.float32)
+    return gaussian_filter(frame, sigma=config.HUMAN_GAUSSIAN_SIGMA).astype(np.float32)
 
 
 def summarize_array(prefix: str, arr: np.ndarray) -> dict[str, float]:
@@ -57,13 +56,14 @@ def run(
     metadata_path: Path | None = None,
     output_path: Path | None = None,
 ) -> Path:
-    """遍历人类 Step 01 输出帧，生成只包含高斯平滑结果的 human_smoothed.npy。"""
+    """遍历人类 Step 01 输出帧，生成局部极大值搜索用的 human_smoothed.npy。"""
 
     input_dir = ulm_io.step_dir("human", "step01_bandpass")
-    output_dir = ulm_io.step_dir("human", "step02_gaussian_filter")
+    default_output_dir = ulm_io.step_dir("human", "step02_gaussian_filter")
     frames_path = frames_path or (input_dir / "human_filtered.npy")
     metadata_path = metadata_path or ulm_io.default_metadata_path("human")
-    output_path = output_path or (output_dir / "human_smoothed.npy")
+    output_path = output_path or (default_output_dir / "human_smoothed.npy")
+    output_dir = output_path.parent
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     _ = ulm_io.load_metadata(metadata_path)
@@ -79,7 +79,7 @@ def run(
     save_frame_png_raw_scale(
         smooth_view[preview_idx],
         output_dir / f"signed_smoothed_frame_{preview_idx:04d}.png",
-        f"Signed Gaussian smoothed frame {preview_idx}",
+        f"Akebia-style Gaussian local-max guide frame {preview_idx}",
         cmap="seismic",
         vmin=vmin,
         vmax=vmax,
@@ -89,7 +89,7 @@ def run(
         smooth_view[preview_idx],
         output_dir / "bandpass_vs_gaussian_frame_comparison.png",
         f"Step 1 signed bandpass frame {preview_idx}",
-        f"Step 2 signed Gaussian smoothed frame {preview_idx}",
+        f"Step 2 Gaussian local-max guide frame {preview_idx}",
     )
     stats_path = output_dir / "gaussian_stats.json"
     stats = {
@@ -99,7 +99,8 @@ def run(
         "input_bandpass_abs_p99": float(np.percentile(np.abs(frames), 99)),
         "smoothed_abs_p95": float(np.percentile(np.abs(smooth_view), 95)),
         "smoothed_abs_p99": float(np.percentile(np.abs(smooth_view), 99)),
-        "gaussian_sigma": float(config.GAUSSIAN_SIGMA),
+        "gaussian_sigma": float(config.HUMAN_GAUSSIAN_SIGMA),
+        "akebia_reference": "ULM_localization2D_interp: imregionalmax(imgaussfilt(frame, sigma)) uses sigma=1 for human profiles",
         "n_frames": int(frames.shape[0]),
         "height": int(frames.shape[1]),
         "width": int(frames.shape[2]),

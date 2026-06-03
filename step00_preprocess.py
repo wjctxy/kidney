@@ -4,7 +4,7 @@ Input:
     human_dcm/11.0.dcm 或 mouse_dcm/11.0.dcm
 
 Output:
-    human_dcm/step00_preprocess/frames.npy: float32 [T,H,W]，灰度、裁剪 ROI、归一化到 [0,1]
+    human_dcm/step00_preprocess/frames.npy: float32 [T,H,W]，单通道 CEUS score/灰度、裁剪 ROI、归一化到 [0,1]
     human_dcm/step00_preprocess/metadata.json: fps、像素尺寸、ROI、帧数等元数据
     human_dcm/step00_preprocess/preview_frame_000.png: 预处理后首帧预览
 
@@ -27,7 +27,10 @@ DEFAULT_MAX_FRAMES = 600
 
 
 def run(kind: str, dicom: Path | None = None, max_frames: int | None = DEFAULT_MAX_FRAMES) -> tuple[Path, Path]:
-    """执行 step0：把指定物种目录下的 DICOM 转换为 frames.npy 和 metadata.json。"""
+    """执行 step0：把 DICOM 转换为单通道 frames.npy 和 metadata.json。
+
+    彩色伪彩 CEUS 会提取橙黄色造影增强 score；单通道 DICOM 保留灰度强度。
+    """
 
     data_dir = ulm_io.step_dir(kind, "step00_preprocess")
     dicom_path = dicom or ulm_io.default_dicom_path(kind)
