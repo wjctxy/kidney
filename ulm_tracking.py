@@ -94,16 +94,34 @@ def track_detections(
     metadata: dict,
     output_dir: str | Path,
     prefix: str,
+    max_frame_displacement_px: float | None = None,
+    min_track_length: int | None = None,
+    max_missing_frames: int | None = None,
+    max_gap_closing_frames: int | None = None,
 ) -> Path:
     """只执行匈牙利轨迹追踪，写出 tracks.csv 和 tracking_summary.txt。"""
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     detections = _load_detections(detections_csv)
-    tracks = _track_detections(detections, metadata)
+    tracks = _track_detections(
+        detections,
+        metadata,
+        max_frame_displacement_px=max_frame_displacement_px,
+        min_track_length=min_track_length,
+        max_missing_frames=max_missing_frames,
+        max_gap_closing_frames=max_gap_closing_frames,
+    )
     tracks_csv = output_dir / f"{prefix}_tracks.csv"
     _write_tracks(tracks, tracks_csv)
-    _write_tracking_summary(tracks, output_dir / "tracking_summary.txt", detections)
+    _write_tracking_summary(
+        tracks,
+        output_dir / "tracking_summary.txt",
+        detections,
+        min_track_length=min_track_length,
+        max_frame_displacement_px=max_frame_displacement_px,
+        max_missing_frames=max_missing_frames,
+    )
     return tracks_csv
 
 
@@ -139,6 +157,54 @@ def reconstruct_density_and_metrics(
         "density_low_speed": density_paths["low"],
         "density_high_speed": density_paths["high"],
         "density_speed_overlay": density_paths["speed_overlay"],
+        "metrics": metrics_csv,
+        "summary": summary_txt,
+    }
+
+
+def reconstruct_profile_density_and_metrics(
+    rapid_tracks_csv: str | Path,
+    slow_tracks_csv: str | Path,
+    metadata: dict,
+    output_dir: str | Path,
+    prefix: str,
+) -> dict[str, Path]:
+    """Akebia human 式重建：直接把 Rapid/Slow profile 当作两类轨迹。"""
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rapid_tracks = _load_tracks_csv(rapid_tracks_csv)
+    slow_tracks = _load_tracks_csv(slow_tracks_csv)
+    all_tracks = rapid_tracks + slow_tracks
+
+    rapid_csv = output_dir / f"{prefix}_rapid_tracks.csv"
+    slow_csv = output_dir / f"{prefix}_slow_tracks.csv"
+    metrics_csv = output_dir / f"{prefix}_metrics.csv"
+    summary_txt = output_dir / f"{prefix}_summary.txt"
+
+    _write_tracks(rapid_tracks, rapid_csv)
+    _write_tracks(slow_tracks, slow_csv)
+
+    shape = (int(metadata["height"]), int(metadata["width"]))
+    density_paths = _write_profile_density_maps(all_tracks, rapid_tracks, slow_tracks, shape, output_dir, prefix)
+
+    rapid_metrics = _compute_metrics(rapid_tracks)
+    for row in rapid_metrics:
+        row["speed_group"] = "rapid_profile"
+    slow_metrics = _compute_metrics(slow_tracks)
+    for row in slow_metrics:
+        row["speed_group"] = "slow_profile"
+    metrics = rapid_metrics + slow_metrics
+    _write_metrics(metrics, metrics_csv)
+    _write_profile_summary(rapid_metrics, slow_metrics, summary_txt)
+
+    return {
+        "rapid_tracks": rapid_csv,
+        "slow_tracks": slow_csv,
+        "density_total": density_paths["total"],
+        "density_rapid": density_paths["rapid"],
+        "density_slow": density_paths["slow"],
+        "density_profile_overlay": density_paths["profile_overlay"],
         "metrics": metrics_csv,
         "summary": summary_txt,
     }
@@ -181,8 +247,17 @@ def _load_detections(path: str | Path) -> dict[int, list[dict[str, float | int |
 def _track_detections(
     detections: dict[int, list[dict[str, float | int | str]]],
     metadata: dict,
+    max_frame_displacement_px: float | None = None,
+    min_track_length: int | None = None,
+    max_missing_frames: int | None = None,
+    max_gap_closing_frames: int | None = None,
 ) -> list[Track]:
     """维护 active/finished 轨迹集合，把逐帧检测点连接成完整轨迹。"""
+
+    max_frame_displacement_px = float(max_frame_displacement_px if max_frame_displacement_px is not None else config.MAX_FRAME_DISPLACEMENT_PX)
+    min_track_length = int(min_track_length if min_track_length is not None else config.MIN_TRACK_LENGTH)
+    max_missing_frames = int(max_missing_frames if max_missing_frames is not None else config.MAX_MISSING_FRAMES)
+    max_gap_closing_frames = int(max_gap_closing_frames if max_gap_closing_frames is not None else getattr(config, "MAX_GAP_CLOSING_FRAMES", 0))
 
     active: list[Track] = []
     finished: list[Track] = []
@@ -190,7 +265,7 @@ def _track_detections(
 
     for frame_id in tqdm(sorted(detections), desc="tracking", unit="frame"):
         points = detections[frame_id]
-        assigned_tracks, assigned_points = _assign(active, points)
+        assigned_tracks, assigned_points = _assign(active, points, max_frame_displacement_px)
 
         for track_idx, point_idx in zip(assigned_tracks, assigned_points):
             track = active[track_idx]
@@ -206,7 +281,7 @@ def _track_detections(
         for idx, track in enumerate(active):
             if idx not in assigned_track_set:
                 track.missing += 1
-            if track.missing <= config.MAX_MISSING_FRAMES:
+            if track.missing <= max_missing_frames:
                 still_active.append(track)
             else:
                 track.killed = True  # Akebia 式：被匈牙利遗漏导致死亡
@@ -226,16 +301,15 @@ def _track_detections(
     finished.extend(active)
 
     # ── Akebia 式 gap-closing：只对被杀的尾 ↔ 孤儿头做跨帧桥接 ──
-    if getattr(config, 'MAX_GAP_CLOSING_FRAMES', 0) > 0:
-        finished = _gap_closing_merge(finished)
+    if max_gap_closing_frames > 0:
+        finished = _gap_closing_merge(finished, max_gap_closing_frames, max_frame_displacement_px)
 
-    return [track for track in finished if len(track.points) >= config.MIN_TRACK_LENGTH]
+    return [track for track in finished if len(track.points) >= min_track_length]
 
 
-def _gap_closing_merge(tracks: list[Track]) -> list[Track]:
+def _gap_closing_merge(tracks: list[Track], max_gap: int, max_dist: float) -> list[Track]:
     """Akebia 式 gap-closing：只对被匈牙利遗漏杀死的 track 尾端与孤儿起始 track 头端做最近邻桥接。"""
 
-    max_gap = int(getattr(config, 'MAX_GAP_CLOSING_FRAMES', 0))
     if max_gap <= 0 or len(tracks) <= 1:
         return tracks
 
@@ -270,7 +344,6 @@ def _gap_closing_merge(tracks: list[Track]) -> list[Track]:
     for head in orphan_heads:
         heads_by_frame.setdefault(head["frame_id"], []).append(head)
 
-    max_dist = float(config.MAX_FRAME_DISPLACEMENT_PX)
     merged = list(tracks)
     used_heads: set[int] = set()  # Akebia 式：已用头不得重复桥接
 
@@ -317,7 +390,11 @@ def _gap_closing_merge(tracks: list[Track]) -> list[Track]:
     return [t for t in merged if len(t.points) > 0]
 
 
-def _assign(active: list[Track], points: list[dict[str, float | int | str]]) -> tuple[list[int], list[int]]:
+def _assign(
+    active: list[Track],
+    points: list[dict[str, float | int | str]],
+    max_frame_displacement_px: float,
+) -> tuple[list[int], list[int]]:
     """用距离矩阵和匈牙利算法匹配当前活跃轨迹与当前帧检测点。"""
 
     if not active or not points:
@@ -328,7 +405,7 @@ def _assign(active: list[Track], points: list[dict[str, float | int | str]]) -> 
 
     # 匈牙利算法只处理相邻帧的最小代价匹配；最大位移约束负责过滤不合理连接。
     cost = cdist(last_xy, point_xy)
-    cost[cost > config.MAX_FRAME_DISPLACEMENT_PX] = 1e9
+    cost[cost > max_frame_displacement_px] = 1e9
     rows, cols = linear_sum_assignment(cost)
 
     keep_rows: list[int] = []
@@ -446,6 +523,9 @@ def _write_tracking_summary(
     tracks: list[Track],
     path: str | Path,
     detections: dict[int, list[dict[str, float | int | str]]],
+    min_track_length: int | None = None,
+    max_frame_displacement_px: float | None = None,
+    max_missing_frames: int | None = None,
 ) -> None:
     """写出 Step 03 追踪摘要，不包含速度分组、密度图或指标统计。"""
 
@@ -455,9 +535,9 @@ def _write_tracking_summary(
         f"frames_with_detections: {len(detections)}",
         f"detections: {detection_count}",
         f"valid_tracks: {len(tracks)}",
-        f"min_track_length: {config.MIN_TRACK_LENGTH}",
-        f"max_frame_displacement_px: {config.MAX_FRAME_DISPLACEMENT_PX}",
-        f"max_missing_frames: {config.MAX_MISSING_FRAMES}",
+        f"min_track_length: {int(min_track_length if min_track_length is not None else config.MIN_TRACK_LENGTH)}",
+        f"max_frame_displacement_px: {float(max_frame_displacement_px if max_frame_displacement_px is not None else config.MAX_FRAME_DISPLACEMENT_PX)}",
+        f"max_missing_frames: {int(max_missing_frames if max_missing_frames is not None else config.MAX_MISSING_FRAMES)}",
     ]
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
@@ -484,6 +564,30 @@ def _write_density_maps(
     cv2.imwrite(str(high_path), _colorize(high, (0, 255, 0)))
     cv2.imwrite(str(overlay_path), _speed_overlay(low, high))
     return {"total": total_path, "low": low_path, "high": high_path, "speed_overlay": overlay_path}
+
+
+def _write_profile_density_maps(
+    tracks: list[Track],
+    rapid_tracks: list[Track],
+    slow_tracks: list[Track],
+    shape: tuple[int, int],
+    output_dir: Path,
+    prefix: str,
+) -> dict[str, Path]:
+    """写出 Akebia profile 密度图：rapid、slow、合计和合成图。"""
+
+    total = _density_from_tracks(tracks, shape)
+    rapid = _density_from_tracks(rapid_tracks, shape)
+    slow = _density_from_tracks(slow_tracks, shape)
+    total_path = output_dir / f"{prefix}_density_total.png"
+    rapid_path = output_dir / f"{prefix}_density_rapid.png"
+    slow_path = output_dir / f"{prefix}_density_slow.png"
+    overlay_path = output_dir / f"{prefix}_density_profile_overlay.png"
+    cv2.imwrite(str(total_path), _colorize(total, (255, 255, 255)))
+    cv2.imwrite(str(rapid_path), _colorize(rapid, (0, 255, 0)))
+    cv2.imwrite(str(slow_path), _colorize(slow, (255, 0, 255)))
+    cv2.imwrite(str(overlay_path), _speed_overlay(slow, rapid))
+    return {"total": total_path, "rapid": rapid_path, "slow": slow_path, "profile_overlay": overlay_path}
 
 
 def _density_from_tracks(tracks: list[Track], shape: tuple[int, int]) -> np.ndarray:
@@ -638,6 +742,34 @@ def _write_summary(rows: list[dict[str, float | int | str]], path: str | Path) -
         f"low_speed_max_enclosed_area_pixels: <= {config.GLOMERULUS_MAX_ENCLOSED_AREA_PIXELS}",
         f"mean_displacement_px_per_frame: {_mean(rows, 'mean_displacement_px_per_frame'):.6f}",
         f"mean_track_enclosed_area_pixels: {_mean(rows, 'track_enclosed_area_pixels'):.6f}",
+        f"mean_velocity: {_mean(rows, 'mean_velocity'):.6f}",
+        f"mean_normalized_distance: {_mean(rows, 'normalized_distance'):.6f}",
+        f"mean_dwell_time_s: {_mean(rows, 'dwell_time_s'):.6f}",
+        f"mean_dispersion: {_mean(rows, 'dispersion'):.6f}",
+    ]
+    Path(path).write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_profile_summary(
+    rapid_rows: list[dict[str, float | int | str]],
+    slow_rows: list[dict[str, float | int | str]],
+    path: str | Path,
+) -> None:
+    """写出 Akebia human Rapid/Slow profile 摘要。"""
+
+    rows = rapid_rows + slow_rows
+    lines = [
+        "ULM Akebia-profile 轨迹指标摘要",
+        f"total_tracks: {len(rows)}",
+        f"rapid_profile_tracks: {len(rapid_rows)}",
+        f"slow_profile_tracks: {len(slow_rows)}",
+        "rapid_profile_definition: Akebia human Rapid parameters, bandpass [1, 5.5] Hz, maxLinkingDistance=15, minLength=5",
+        "slow_profile_definition: Akebia human Slow parameters, no bandpass, maxLinkingDistance=4, minLength=10",
+        f"rapid_mean_displacement_px_per_frame: {_mean(rapid_rows, 'mean_displacement_px_per_frame'):.6f}",
+        f"slow_mean_displacement_px_per_frame: {_mean(slow_rows, 'mean_displacement_px_per_frame'):.6f}",
+        f"rapid_mean_velocity: {_mean(rapid_rows, 'mean_velocity'):.6f}",
+        f"slow_mean_velocity: {_mean(slow_rows, 'mean_velocity'):.6f}",
+        f"mean_displacement_px_per_frame: {_mean(rows, 'mean_displacement_px_per_frame'):.6f}",
         f"mean_velocity: {_mean(rows, 'mean_velocity'):.6f}",
         f"mean_normalized_distance: {_mean(rows, 'normalized_distance'):.6f}",
         f"mean_dwell_time_s: {_mean(rows, 'dwell_time_s'):.6f}",

@@ -48,6 +48,21 @@ human_dcm/step00_preprocess/preview_frame_000.png
 
 ## 人类链路
 
+Akebia-style 双 profile 入口：
+
+```bash
+python human_run_profiles.py --label stable_200_400
+```
+
+该入口会从同一个 Step00 输入分别运行 Rapid 和 Slow：
+
+```text
+Rapid: bandpass [1, 5.5] Hz, maxLinkingDistance=15, minLength=5
+Slow: no bandpass, maxLinkingDistance=4, minLength=10
+```
+
+也可以逐步运行单 profile：
+
 ```bash
 python human_step01_bandpass.py
 python human_step02_gaussian_filter.py

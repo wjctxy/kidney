@@ -28,6 +28,28 @@ DEFAULT_PIXEL_SIZE_Y = 0.0063787375415282396
 HUMAN_BANDPASS_LOW_HZ = 1.0
 HUMAN_BANDPASS_HIGH_HZ = 5.5
 HUMAN_BANDPASS_ORDER = 1
+HUMAN_PROFILES = {
+    "rapid": {
+        "use_bandpass": True,
+        "bandpass_low_hz": 1.0,
+        "bandpass_high_hz": 5.5,
+        "bandpass_order": 1,
+        "max_frame_displacement_px": 15.0,
+        "min_track_length": 5,
+        "max_missing_frames": 0,
+        "max_gap_closing_frames": 0,
+    },
+    "slow": {
+        "use_bandpass": False,
+        "bandpass_low_hz": 0.05,
+        "bandpass_high_hz": 1.0,
+        "bandpass_order": 1,
+        "max_frame_displacement_px": 4.0,
+        "min_track_length": 10,
+        "max_missing_frames": 0,
+        "max_gap_closing_frames": 0,
+    },
+}
 
 # 人类链路：Akebia human localization 中的二维高斯平滑只用于找局部极大值。
 HUMAN_GAUSSIAN_SIGMA = 1.0

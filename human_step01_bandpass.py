@@ -14,10 +14,9 @@ Output:
     human_dcm/step01_bandpass/bandpass_stats.json
 
 算法说明:
-    对每个空间位置 (x,y) 的时间曲线 I(x,y,t) 做 Akebia human Rapid profile
-    同形式的一阶 Butterworth 因果带通：butter(order=1) + lfilter。
-    低频部分多为组织、呼吸和探头慢变化，高频部分多为随机噪声；
-    带通后保留微泡运动对应的中间频段。
+    支持 Akebia human 的 Rapid/Slow 两套 profile。
+    Rapid 使用一阶 Butterworth 因果带通：butter(order=1) + lfilter，[1, 5.5] Hz。
+    Slow 对应 Akebia human useBandpass=false，不做时域带通，直接传递 Step0 帧。
 """
 
 from __future__ import annotations
@@ -69,6 +68,21 @@ def temporal_bandpass(
     return lfilter(b, a, frames, axis=0).astype(np.float32)
 
 
+def temporal_filter_for_profile(frames: np.ndarray, fps: float, profile: str) -> np.ndarray:
+    """按 Akebia human profile 执行 Step01。"""
+
+    params = config.HUMAN_PROFILES[profile]
+    if not params["use_bandpass"]:
+        return frames.astype(np.float32, copy=True)
+    return temporal_bandpass(
+        frames,
+        fps=fps,
+        lowcut=float(params["bandpass_low_hz"]),
+        highcut=float(params["bandpass_high_hz"]),
+        order=int(params["bandpass_order"]),
+    )
+
+
 def summarize_array(name: str, arr: np.ndarray) -> dict[str, float]:
     """计算数组基础统计量，便于判断滤波前后真实幅度变化。"""
 
@@ -88,8 +102,12 @@ def run(
     metadata_path: Path | None = None,
     output_path: Path | None = None,
     row_block: int = 32,
+    profile: str = "rapid",
 ) -> Path:
-    """读取人类 frames.npy，分块执行时域带通滤波，并保存 human_filtered.npy。"""
+    """读取人类 frames.npy，按 Akebia human profile 执行 Step01。"""
+
+    if profile not in config.HUMAN_PROFILES:
+        raise ValueError(f"profile must be one of {sorted(config.HUMAN_PROFILES)}")
 
     frames_path = frames_path or ulm_io.default_frames_path("human")
     metadata_path = metadata_path or ulm_io.default_metadata_path("human")
@@ -106,12 +124,10 @@ def run(
     for y0 in range(0, height, row_block):
         y1 = min(height, y0 + row_block)
         block = frames[:, y0:y1, :]
-        out[:, y0:y1, :] = temporal_bandpass(
+        out[:, y0:y1, :] = temporal_filter_for_profile(
             block,
             fps=float(metadata["fps"]),
-            lowcut=config.HUMAN_BANDPASS_LOW_HZ,
-            highcut=config.HUMAN_BANDPASS_HIGH_HZ,
-            order=config.HUMAN_BANDPASS_ORDER,
+            profile=profile,
         )
     out.flush()
     filtered = ulm_io.load_frames(output_path)  # 重新加载输出用于可视化
@@ -159,11 +175,13 @@ def run(
         "bandpass_abs_p95": float(np.percentile(np.abs(filtered), 95)),
         "bandpass_abs_p99": float(np.percentile(np.abs(filtered), 99)),
         "fps": float(metadata["fps"]),
-        "lowcut": float(config.HUMAN_BANDPASS_LOW_HZ),
-        "highcut": float(config.HUMAN_BANDPASS_HIGH_HZ),
-        "filter_order": int(config.HUMAN_BANDPASS_ORDER),
-        "filter_method": "butterworth_causal_lfilter",
-        "akebia_reference": "akebia_human Rapid: butter(1), filter(), bandpassBounds=[1, 5.5] Hz",
+        "profile": profile,
+        "use_bandpass": bool(config.HUMAN_PROFILES[profile]["use_bandpass"]),
+        "lowcut": float(config.HUMAN_PROFILES[profile]["bandpass_low_hz"]),
+        "highcut": float(config.HUMAN_PROFILES[profile]["bandpass_high_hz"]),
+        "filter_order": int(config.HUMAN_PROFILES[profile]["bandpass_order"]),
+        "filter_method": "butterworth_causal_lfilter" if config.HUMAN_PROFILES[profile]["use_bandpass"] else "none",
+        "akebia_reference": "akebia_human Rapid uses bandpass [1, 5.5] Hz; Slow uses useBandpass=false",
         "n_frames": int(n_frames),
     }
     with stats_path.open("w", encoding="utf-8") as f:  # 保存统计 JSON
@@ -186,9 +204,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metadata", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--row-block", type=int, default=32)
+    parser.add_argument("--profile", choices=sorted(config.HUMAN_PROFILES), default="rapid")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run(args.frames, args.metadata, args.output, args.row_block)
+    run(args.frames, args.metadata, args.output, args.row_block, args.profile)

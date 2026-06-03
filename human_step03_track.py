@@ -162,8 +162,12 @@ def run(
     metadata_path: Path | None = None,
     output_dir: Path | None = None,
     preview_frame: int = DEFAULT_PREVIEW_FRAME,
+    profile: str = "rapid",
 ) -> dict[str, Path]:
     """运行 Human Step 03：Akebia human 式检测后进行匈牙利轨迹追踪。"""
+
+    if profile not in config.HUMAN_PROFILES:
+        raise ValueError(f"profile must be one of {sorted(config.HUMAN_PROFILES)}")
 
     frames_path = frames_path or (ulm_io.step_dir("human", "step01_bandpass") / "human_filtered.npy")
     smooth_frames_path = smooth_frames_path or (ulm_io.step_dir("human", "step02_gaussian_filter") / "human_smoothed.npy")
@@ -179,7 +183,17 @@ def run(
         output_dir,
         preview_frame,
     )
-    tracks_csv = track_detections(detections_csv, metadata, output_dir, prefix="human")
+    profile_params = config.HUMAN_PROFILES[profile]
+    tracks_csv = track_detections(
+        detections_csv,
+        metadata,
+        output_dir,
+        prefix="human",
+        max_frame_displacement_px=float(profile_params["max_frame_displacement_px"]),
+        min_track_length=int(profile_params["min_track_length"]),
+        max_missing_frames=int(profile_params["max_missing_frames"]),
+        max_gap_closing_frames=int(profile_params["max_gap_closing_frames"]),
+    )
     tracking_summary = output_dir / "tracking_summary.txt"
     print(f"human_tracks: {tracks_csv}")
     print(f"tracking_summary: {tracking_summary}")
@@ -195,9 +209,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metadata", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--preview-frame", type=int, default=DEFAULT_PREVIEW_FRAME)
+    parser.add_argument("--profile", choices=sorted(config.HUMAN_PROFILES), default="rapid")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run(args.frames, args.smooth_frames, args.metadata, args.output_dir, args.preview_frame)
+    run(args.frames, args.smooth_frames, args.metadata, args.output_dir, args.preview_frame, args.profile)
