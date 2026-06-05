@@ -108,6 +108,55 @@ python mouse_step03_track_reconstruct.py
 
 输出集中在 `mouse_dcm/`。当前没有真实小鼠样例，因此这条链路只按接口和算法要求实现，未用小鼠数据校准参数。
 
+## Step 5：肾小球候选计数
+
+`human_step05_glomeruli_count.py` 使用慢速轨迹的 normalized distance 在物理坐标和 isotropic grid 上生成肾小球候选 mask，再反向筛选肾小球相关轨迹点、重建轨迹分布图，并用 DBSCAN 聚类计数。核心鼠类参数默认是 `glomerulus_radius_mm=0.05`、`iso_spacing_mm=0.02`。
+
+当前 Step 5 loose 计数已按 CT 层扫切片约 450 个肾小球标定：`loose_inside_frac=0.0`、`dbscan_eps_mm=0.23`、`dbscan_min_samples=1`。strict 计数保留为更保守参考。
+
+交互式制作 cortex/exclude mask：
+
+```bash
+python draw_step5_masks.py \
+  --image human_dcm/step04_density_metrics/stable_200_400/human_density_slow.png \
+  --output masks/cortex_mask.npy \
+  --overlay masks/cortex_mask_overlay.png \
+  --mode cortex
+
+python draw_step5_masks.py \
+  --image human_dcm/step04_density_metrics/stable_200_400/human_density_slow.png \
+  --output masks/exclude_mask.npy \
+  --overlay masks/exclude_mask_overlay.png \
+  --mode exclude
+```
+
+快捷键：`Enter` 完成当前 polygon，`n` 新建下一个 polygon，`u` 撤销上一个 polygon，`s` 保存，`q` 退出。mask 会保持输入 density/image 的原始 shape，Step 5 内部会负责转换到 isotropic grid。
+
+也可以直接使用已打包的 macOS 可执行版：
+
+```bash
+step5/app/dist/Step5MaskDrawer/Step5MaskDrawer.exe \
+  --image human_dcm/step04_density_metrics/stable_200_400/human_density_slow.png \
+  --output masks/cortex_mask.npy \
+  --overlay masks/cortex_mask_overlay.png \
+  --mode cortex
+```
+
+```bash
+python human_step05_glomeruli_count.py \
+  --slow-tracks human_dcm/step04_density_metrics/stable_200_400/human_slow_tracks.csv \
+  --fast-tracks human_dcm/step04_density_metrics/stable_200_400/human_rapid_tracks.csv \
+  --slow-density human_dcm/step04_density_metrics/stable_200_400/human_density_slow.png \
+  --fast-density human_dcm/step04_density_metrics/stable_200_400/human_density_rapid.png \
+  --cortex-mask masks/cortex_mask.npy \
+  --exclude-mask masks/exclude_mask.npy \
+  --output-dir human_dcm/step05_glomeruli_count/stable_200_400
+```
+
+关键输出包括 `final_glomeruli_*.csv`、`filtered_points_*.csv`、`glomerular_track_distribution_*.png` 和 `glomerular_track_distribution_*_on_slow_density.png`。
+
+如果没有 `cortex_mask` 也能运行，但会在 `summary.json` 中记录误检风险 warning。
+
 ## 快速烟测
 
 完整 DICOM 有 1802 帧。当前默认先处理 600 帧，兼顾滤波稳定性和运行时间；如需处理全部帧，使用 `--max-frames 0`。
