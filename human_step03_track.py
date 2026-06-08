@@ -29,7 +29,7 @@ from skimage.feature import peak_local_max
 
 import ulm_config as config
 import ulm_io
-from ulm_tracking import track_detections, write_detections
+from ulm_tracking import track_detections, write_frame_detections
 from ulm_visualization import save_detection_pipeline_preview, save_detection_preview, symmetric_limits
 
 
@@ -107,11 +107,12 @@ def detect_bubbles(
     if smooth_frames.shape != frames.shape:
         raise ValueError(f"smooth guide shape {smooth_frames.shape} must match frames shape {frames.shape}")
 
-    rows: list[dict[str, float | int | str]] = []
-    for frame_id in range(frames.shape[0]):
-        rows.extend(detect_frame(frames[frame_id], smooth_frames[frame_id], frame_id, metadata))
-
-    detections_csv = write_detections(rows, output_csv)
+    detections_csv, detection_count = write_frame_detections(
+        frames.shape[0],
+        lambda frame_id: detect_frame(frames[frame_id], smooth_frames[frame_id], frame_id, metadata),
+        output_csv,
+        desc="human detection",
+    )
     preview_frame_id = resolve_preview_frame_id(frames.shape[0], preview_frame)
     signed_preview = frames[preview_frame_id]
     preview_response = build_detection_response(signed_preview)
@@ -149,7 +150,7 @@ def detect_bubbles(
         pipeline_path,
         frame_id=preview_frame_id,
     )
-    print(f"human_detections: {detections_csv}")
+    print(f"human_detections: {detections_csv} count={detection_count}")
     print(f"detections_positive_response_preview: {positive_path}")
     print(f"detections_signed_preview: {signed_path}")
     print(f"detection_pipeline_preview: {pipeline_path}")

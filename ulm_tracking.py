@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -87,6 +88,20 @@ def write_detections(rows: list[dict[str, float | int | str]], path: str | Path)
         writer.writeheader()
         writer.writerows(rows)
     return path
+
+
+def write_frame_detections(
+    n_frames: int,
+    detector: Callable[[int], list[dict[str, float | int | str]]],
+    path: str | Path,
+    desc: str = "detecting",
+) -> tuple[Path, int]:
+    """逐帧调用 detector，汇总检测点并写出统一 detections.csv。"""
+
+    rows: list[dict[str, float | int | str]] = []
+    for frame_id in tqdm(range(n_frames), desc=desc, unit="frame"):
+        rows.extend(detector(frame_id))
+    return write_detections(rows, path), len(rows)
 
 
 def track_detections(
@@ -208,21 +223,6 @@ def reconstruct_profile_density_and_metrics(
         "metrics": metrics_csv,
         "summary": summary_txt,
     }
-
-
-def track_and_reconstruct(
-    detections_csv: str | Path,
-    metadata: dict,
-    output_dir: str | Path,
-    prefix: str,
-) -> dict[str, Path]:
-    """兼容旧入口：从 detections.csv 追踪后继续生成密度图和指标。"""
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    tracks_csv = track_detections(detections_csv, metadata, output_dir, prefix)
-    outputs = reconstruct_density_and_metrics(tracks_csv, metadata, output_dir, prefix)
-    return {"tracks": tracks_csv, **outputs}
 
 
 def _load_detections(path: str | Path) -> dict[int, list[dict[str, float | int | str]]]:

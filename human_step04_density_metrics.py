@@ -46,23 +46,19 @@ def run(
 
     if rapid_tracks_csv is not None and slow_tracks_csv is not None:
         outputs = reconstruct_profile_density_and_metrics(rapid_tracks_csv, slow_tracks_csv, metadata, output_dir, prefix="human")
-        print(f"rapid_tracks: {outputs['rapid_tracks']}")
-        print(f"slow_tracks: {outputs['slow_tracks']}")
-        print(f"density_total: {outputs['density_total']}")
-        print(f"density_rapid: {outputs['density_rapid']}")
-        print(f"density_slow: {outputs['density_slow']}")
-        print(f"density_profile_overlay: {outputs['density_profile_overlay']}")
+        _print_outputs(outputs, ("rapid_tracks", "slow_tracks", "density_total", "density_rapid", "density_slow", "density_profile_overlay"))
     else:
         outputs = reconstruct_density_and_metrics(tracks_csv, metadata, output_dir, prefix="human")
-        print(f"low_speed_tracks: {outputs['low_tracks']}")
-        print(f"high_speed_tracks: {outputs['high_tracks']}")
-        print(f"density_total: {outputs['density_total']}")
-        print(f"density_low_speed: {outputs['density_low_speed']}")
-        print(f"density_high_speed: {outputs['density_high_speed']}")
-        print(f"density_speed_overlay: {outputs['density_speed_overlay']}")
-    print(f"metrics: {outputs['metrics']}")
-    print(f"summary: {outputs['summary']}")
+        _print_outputs(outputs, ("low_tracks", "high_tracks", "density_total", "density_low_speed", "density_high_speed", "density_speed_overlay"))
     return outputs
+
+
+def _print_outputs(outputs: dict[str, Path], keys: tuple[str, ...]) -> None:
+    """按固定顺序打印本 step 产生的输出路径。"""
+
+    labels = {"low_tracks": "low_speed_tracks", "high_tracks": "high_speed_tracks"}
+    for key in (*keys, "metrics", "summary"):
+        print(f"{labels.get(key, key)}: {outputs[key]}")
 
 
 def parse_args() -> argparse.Namespace:

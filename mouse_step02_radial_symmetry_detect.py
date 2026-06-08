@@ -24,7 +24,7 @@ from skimage.feature import peak_local_max
 
 import ulm_config as config
 import ulm_io
-from ulm_tracking import write_detections
+from ulm_tracking import write_frame_detections
 from ulm_visualization import save_detection_preview
 
 
@@ -106,14 +106,15 @@ def run(
 
     frames = ulm_io.load_frames(frames_path)
     metadata = ulm_io.load_metadata(metadata_path)
-    rows: list[dict[str, float | int | str]] = []
-    for frame_id in range(frames.shape[0]):
-        rows.extend(detect_frame(frames[frame_id], frame_id, metadata))
-
-    path = write_detections(rows, output_csv)
+    path, detection_count = write_frame_detections(
+        frames.shape[0],
+        lambda frame_id: detect_frame(frames[frame_id], frame_id, metadata),
+        output_csv,
+        desc="mouse detection",
+    )
     preview_path = output_dir / "detections_frame_000.png"
     save_detection_preview(frames[0], path, preview_path, frame_id=0)
-    print(f"detections: {path} count={len(rows)}")
+    print(f"detections: {path} count={detection_count}")
     print(f"preview: {preview_path}")
     return path
 

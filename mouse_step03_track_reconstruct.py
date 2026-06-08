@@ -21,7 +21,7 @@ import argparse
 from pathlib import Path
 
 import ulm_io
-from ulm_tracking import track_and_reconstruct
+from ulm_tracking import reconstruct_density_and_metrics, track_detections
 
 
 def run(
@@ -35,7 +35,11 @@ def run(
     metadata_path = metadata_path or ulm_io.default_metadata_path("mouse")
     output_dir = output_dir or ulm_io.step_dir("mouse", "step03_track_reconstruct")
     metadata = ulm_io.load_metadata(metadata_path)
-    outputs = track_and_reconstruct(detections_csv, metadata, output_dir, prefix="mouse")
+    tracks_csv = track_detections(detections_csv, metadata, output_dir, prefix="mouse")
+    outputs = {
+        "tracks": tracks_csv,
+        **reconstruct_density_and_metrics(tracks_csv, metadata, output_dir, prefix="mouse"),
+    }
     for name, path in outputs.items():
         print(f"{name}: {path}")
     return outputs

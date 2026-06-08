@@ -112,7 +112,7 @@ python mouse_step03_track_reconstruct.py
 
 `human_step05_glomeruli_count.py` 使用慢速轨迹的 normalized distance 在物理坐标和 isotropic grid 上生成肾小球候选 mask，再反向筛选肾小球相关轨迹点、重建轨迹分布图，并用 DBSCAN 聚类计数。核心鼠类参数默认是 `glomerulus_radius_mm=0.05`、`iso_spacing_mm=0.02`。
 
-当前 Step 5 loose 计数已按 CT 层扫切片约 450 个肾小球标定：`loose_inside_frac=0.0`、`dbscan_eps_mm=0.23`、`dbscan_min_samples=1`。strict 计数保留为更保守参考。
+当前 Step 5 使用单一候选集计数，已按 CT 层扫切片约 450 个肾小球标定：`dbscan_eps_mm=0.19`、`dbscan_min_samples=1`。旧版 loose/strict 双输出已移除，避免同一结果同时存在两套口径。
 
 交互式制作 cortex/exclude mask：
 
@@ -153,7 +153,7 @@ python human_step05_glomeruli_count.py \
   --output-dir human_dcm/step05_glomeruli_count/stable_200_400
 ```
 
-关键输出包括 `final_glomeruli_*.csv`、`filtered_points_*.csv`、`glomerular_track_distribution_*.png` 和 `glomerular_track_distribution_*_on_slow_density.png`。
+关键输出包括 `final_glomeruli.csv`、`filtered_points.csv`、`glomerular_track_distribution.png` 和 `glomerular_track_distribution_on_slow_density.png`。
 
 如果没有 `cortex_mask` 也能运行，但会在 `summary.json` 中记录误检风险 warning。
 

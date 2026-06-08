@@ -41,12 +41,10 @@ class Step5Config:
     gaussian_sigma_radius_ratio: float = 0.5
     min_track_length_points: int = 3
     min_duration_sec: float = 0.10
-    strict_inside_frac: float = 0.80
-    loose_inside_frac: float = 0.0
-    dbscan_eps_mm: float = 0.23
+    dbscan_eps_mm: float = 0.19
     dbscan_min_samples: int = 1
-    fast_vessel_percentile: float = 95.0
-    fast_vessel_dilate_mm: float = 0.10
+    fast_vessel_percentile: float = 98.0
+    fast_vessel_dilate_mm: float = 0.06
     border_margin_mm: float = 0.20
     projection_mode: str = "center"
     min_component_area_factor: float = 0.25
@@ -130,25 +128,21 @@ def run_step5_glomeruli_count(
     metrics = _add_glomerular_inside_fraction(metrics, slow_df, glomerular_mask_iso, iso_shape)
     metrics = _add_center_mask_flag(metrics, fast_vessel_mask_iso, "center_in_fast_vessel")
     metrics["candidate_keep"] = metrics["roi_keep"] & ~metrics["center_in_fast_vessel"]
-    loose_metrics = metrics[metrics["candidate_keep"] & (metrics["glom_inside_frac"] >= cfg.loose_inside_frac)].copy()
-    strict_metrics = metrics[metrics["candidate_keep"] & (metrics["glom_inside_frac"] >= cfg.strict_inside_frac)].copy()
+    selected_metrics = metrics[metrics["candidate_keep"]].copy()
 
-    filtered_points_loose = _filtered_points(slow_df, metrics, loose_metrics, mode="loose")
-    filtered_points_strict = _filtered_points(slow_df, metrics, strict_metrics, mode="strict")
+    filtered_points = _filtered_points(slow_df, metrics, selected_metrics)
 
-    final_glomeruli_loose = _cluster_track_centers(loose_metrics, cfg, mode="loose")
-    final_glomeruli_strict = _cluster_track_centers(strict_metrics, cfg, mode="strict")
-    per_block_counts = _per_block_counts(metrics, loose_metrics, strict_metrics, cfg)
+    final_glomeruli = _cluster_track_centers(selected_metrics, cfg)
+    per_block_counts = _per_block_counts(metrics, selected_metrics, cfg)
 
-    final_combined = pd.concat([final_glomeruli_loose, final_glomeruli_strict], ignore_index=True)
+    _remove_legacy_step5_outputs(output_path)
     _write_outputs(
         output_path,
         cfg,
         metrics,
-        filtered_points_loose,
-        filtered_points_strict,
+        filtered_points,
         per_block_counts,
-        final_combined,
+        final_glomeruli,
         nd_map_iso,
         nd_map_smooth_iso,
         seed_mask_iso,
@@ -159,8 +153,7 @@ def run_step5_glomeruli_count(
     )
     distribution_paths = _write_glomerular_track_distribution_maps(
         output_path,
-        filtered_points_loose,
-        filtered_points_strict,
+        filtered_points,
         original_shape,
         cfg,
         slow_density,
@@ -171,24 +164,18 @@ def run_step5_glomeruli_count(
         "tracks_after_cortex_filter": int((metrics["passes_length"] & metrics["passes_duration"] & metrics["passes_cortex"]).sum()),
         "tracks_after_exclusion_filter": int(metrics["roi_keep"].sum()),
         "tracks_after_fast_vessel_filter": int(metrics["candidate_keep"].sum()),
-        "loose_glom_tracks": int(len(loose_metrics)),
-        "strict_glom_tracks": int(len(strict_metrics)),
-        "loose_glomeruli_count": int(len(final_glomeruli_loose)),
-        "strict_glomeruli_count": int(len(final_glomeruli_strict)),
+        "glomerular_tracks": int(len(selected_metrics)),
+        "glomeruli_count": int(len(final_glomeruli)),
         "iso_spacing_mm": float(cfg.iso_spacing_mm),
         "glomerulus_radius_mm": float(cfg.glomerulus_radius_mm),
         "radius_iso_px": float(radius_iso_px),
         "dbscan_eps_mm": float(cfg.dbscan_eps_mm),
         "dbscan_min_samples": int(cfg.dbscan_min_samples),
-        "loose_inside_frac": float(cfg.loose_inside_frac),
-        "strict_inside_frac": float(cfg.strict_inside_frac),
         "calibration_target_count": int(cfg.calibration_target_count),
-        "calibration_note": "loose parameters calibrated against expected CT slice glomerulus count around 450; masks are unchanged",
+        "calibration_note": "single candidate set calibrated toward expected CT slice glomerulus count around 450; masks are unchanged",
         "warnings": warnings_list,
     }
-    if len(final_glomeruli_loose) > 0 and len(final_glomeruli_strict) < 0.3 * len(final_glomeruli_loose):
-        _warn(summary["warnings"], "strict_count 远小于 calibrated loose_count；strict 仅作为保守参考，标定计数以 loose_count 为准。")
-    if _many_centers_near_fast_vessels(final_glomeruli_loose, final_glomeruli_strict, fast_vessel_mask_iso, cfg):
+    if _many_centers_near_fast_vessels(final_glomeruli, fast_vessel_mask_iso, cfg):
         _warn(summary["warnings"], "较多候选中心靠近 fast_vessel_mask；建议检查主血管排除阈值。")
 
     _save_summary(output_path / "summary.json", summary)
@@ -205,17 +192,13 @@ def run_step5_glomeruli_count(
         fast_vessel_mask_iso,
         nd_map_smooth_iso,
         metrics,
-        loose_metrics,
-        strict_metrics,
-        final_glomeruli_loose,
-        final_glomeruli_strict,
+        selected_metrics,
+        final_glomeruli,
     )
 
     return {
-        "final_glomeruli_loose": final_glomeruli_loose,
-        "final_glomeruli_strict": final_glomeruli_strict,
-        "filtered_points_loose": filtered_points_loose,
-        "filtered_points_strict": filtered_points_strict,
+        "final_glomeruli": final_glomeruli,
+        "filtered_points": filtered_points,
         "per_block_counts": per_block_counts,
         "summary": summary,
         "glomerular_track_distribution": distribution_paths,
@@ -619,7 +602,7 @@ def _add_center_mask_flag(metrics: pd.DataFrame, mask_iso: np.ndarray, column: s
     return metrics
 
 
-def _filtered_points(points: pd.DataFrame, metrics: pd.DataFrame, selected_metrics: pd.DataFrame, mode: str) -> pd.DataFrame:
+def _filtered_points(points: pd.DataFrame, metrics: pd.DataFrame, selected_metrics: pd.DataFrame) -> pd.DataFrame:
     """反向筛选属于肾小球轨迹的 Step3 原始点，并附加轨迹指标。"""
 
     selected_keys = set(selected_metrics["track_key"])
@@ -635,11 +618,10 @@ def _filtered_points(points: pd.DataFrame, metrics: pd.DataFrame, selected_metri
         "center_y_mm",
     ]
     subset = subset.merge(metrics[metric_cols], on="track_key", how="left", suffixes=("", "_track"))
-    subset["mode"] = mode
     return subset
 
 
-def _cluster_track_centers(metrics: pd.DataFrame, cfg: Step5Config, mode: str) -> pd.DataFrame:
+def _cluster_track_centers(metrics: pd.DataFrame, cfg: Step5Config) -> pd.DataFrame:
     """用 DBSCAN 在 mm 坐标下对 track-level centers 聚类计数。"""
 
     columns = [
@@ -652,7 +634,6 @@ def _cluster_track_centers(metrics: pd.DataFrame, cfg: Step5Config, mode: str) -
         "n_blocks",
         "median_normalized_distance",
         "median_speed_mm_s",
-        "mode",
     ]
     if metrics.empty:
         return pd.DataFrame(columns=columns)
@@ -679,7 +660,6 @@ def _cluster_track_centers(metrics: pd.DataFrame, cfg: Step5Config, mode: str) -
                 "n_blocks": int(cluster["block_id"].nunique()),
                 "median_normalized_distance": float(np.median(cluster["normalized_distance"])),
                 "median_speed_mm_s": float(np.median(cluster["mean_speed_mm_s"])),
-                "mode": mode,
             }
         )
     return pd.DataFrame(rows, columns=columns)
@@ -687,8 +667,7 @@ def _cluster_track_centers(metrics: pd.DataFrame, cfg: Step5Config, mode: str) -
 
 def _per_block_counts(
     metrics: pd.DataFrame,
-    loose_metrics: pd.DataFrame,
-    strict_metrics: pd.DataFrame,
+    selected_metrics: pd.DataFrame,
     cfg: Step5Config,
 ) -> pd.DataFrame:
     """逐 block 单独 DBSCAN 计数，便于检查跨 block 聚合前的结果。"""
@@ -696,30 +675,25 @@ def _per_block_counts(
     rows: list[dict[str, Any]] = []
     for block_id in sorted(metrics["block_id"].unique()):
         block_all = metrics[metrics["block_id"] == block_id]
-        block_loose = loose_metrics[loose_metrics["block_id"] == block_id]
-        block_strict = strict_metrics[strict_metrics["block_id"] == block_id]
+        block_selected = selected_metrics[selected_metrics["block_id"] == block_id]
         rows.append(
             {
                 "block_id": int(block_id),
-                "loose_count": int(len(_cluster_track_centers(block_loose, cfg, mode="loose"))),
-                "strict_count": int(len(_cluster_track_centers(block_strict, cfg, mode="strict"))),
+                "glomeruli_count": int(len(_cluster_track_centers(block_selected, cfg))),
                 "n_slow_tracks": int(len(block_all)),
-                "n_loose_tracks": int(len(block_loose)),
-                "n_strict_tracks": int(len(block_strict)),
+                "n_glomerular_tracks": int(len(block_selected)),
             }
         )
     return pd.DataFrame(rows)
 
 
 def _many_centers_near_fast_vessels(
-    loose: pd.DataFrame,
-    strict: pd.DataFrame,
+    centers: pd.DataFrame,
     fast_vessel_mask_iso: np.ndarray,
     cfg: Step5Config,
 ) -> bool:
     """粗略检查候选中心是否大量落在 fast vessel 排除区附近。"""
 
-    centers = pd.concat([loose, strict], ignore_index=True)
     if centers.empty or not fast_vessel_mask_iso.any():
         return False
     radius_px = max(1, int(math.ceil(cfg.fast_vessel_dilate_mm / cfg.iso_spacing_mm)))
@@ -733,8 +707,7 @@ def _write_outputs(
     output_dir: Path,
     cfg: Step5Config,
     metrics: pd.DataFrame,
-    filtered_points_loose: pd.DataFrame,
-    filtered_points_strict: pd.DataFrame,
+    filtered_points: pd.DataFrame,
     per_block_counts: pd.DataFrame,
     final_glomeruli: pd.DataFrame,
     nd_map_iso: np.ndarray,
@@ -748,12 +721,9 @@ def _write_outputs(
     """保存 CSV、NPY 和配置快照。"""
 
     metrics.to_csv(output_dir / "track_metrics.csv", index=False)
-    filtered_points_loose.to_csv(output_dir / "filtered_points_loose.csv", index=False)
-    filtered_points_strict.to_csv(output_dir / "filtered_points_strict.csv", index=False)
+    filtered_points.to_csv(output_dir / "filtered_points.csv", index=False)
     per_block_counts.to_csv(output_dir / "per_block_counts.csv", index=False)
     final_glomeruli.to_csv(output_dir / "final_glomeruli.csv", index=False)
-    final_glomeruli[final_glomeruli["mode"] == "loose"].to_csv(output_dir / "final_glomeruli_loose.csv", index=False)
-    final_glomeruli[final_glomeruli["mode"] == "strict"].to_csv(output_dir / "final_glomeruli_strict.csv", index=False)
     np.save(output_dir / "nd_map_raw_iso.npy", nd_map_iso)
     np.save(output_dir / "nd_map_iso.npy", nd_map_smooth_iso)
     np.save(output_dir / "seed_mask_iso.npy", seed_mask_iso)
@@ -764,60 +734,63 @@ def _write_outputs(
     _save_summary(output_dir / "config.json", asdict(cfg))
 
 
+def _remove_legacy_step5_outputs(output_dir: Path) -> None:
+    """删除旧版 loose/strict 输出，避免和新版单一候选集混在一起。"""
+
+    legacy_names = [
+        "filtered_points_loose.csv",
+        "filtered_points_strict.csv",
+        "final_glomeruli_loose.csv",
+        "final_glomeruli_strict.csv",
+        "final_glomeruli_centers_loose.png",
+        "final_glomeruli_centers_strict.png",
+        "glomerular_track_density_loose.npy",
+        "glomerular_track_density_strict.npy",
+        "glomerular_track_distribution_loose.png",
+        "glomerular_track_distribution_strict.png",
+        "glomerular_track_distribution_overlay.png",
+        "glomerular_track_distribution_loose_on_slow_density.png",
+        "glomerular_track_distribution_strict_on_slow_density.png",
+    ]
+    for name in legacy_names:
+        path = output_dir / name
+        if path.exists():
+            path.unlink()
+
+
 def _write_glomerular_track_distribution_maps(
     output_dir: Path,
-    filtered_points_loose: pd.DataFrame,
-    filtered_points_strict: pd.DataFrame,
+    filtered_points: pd.DataFrame,
     original_shape: tuple[int, int],
     cfg: Step5Config,
     slow_density: np.ndarray | None = None,
 ) -> dict[str, Path]:
     """用筛出的肾小球相关轨迹点重建分布图。
 
-    这里重建的是 loose/strict glomerular tracks 的空间分布，不是候选中心
-    计数图。每个保留轨迹点按原始像素坐标投影到 4 倍超分辨率网格，再
-    Gaussian 平滑成密度图。
+    这里重建的是肾小球相关轨迹点的空间分布，不是候选中心计数图。
+    每个保留轨迹点按原始像素坐标投影到 4 倍超分辨率网格，再 Gaussian 平滑成密度图。
     """
 
-    loose_density = _distribution_density_from_points(filtered_points_loose, original_shape, cfg)
-    strict_density = _distribution_density_from_points(filtered_points_strict, original_shape, cfg)
+    density = _distribution_density_from_points(filtered_points, original_shape, cfg)
 
-    loose_npy = output_dir / "glomerular_track_density_loose.npy"
-    strict_npy = output_dir / "glomerular_track_density_strict.npy"
-    loose_png = output_dir / "glomerular_track_distribution_loose.png"
-    strict_png = output_dir / "glomerular_track_distribution_strict.png"
-    overlay_png = output_dir / "glomerular_track_distribution_overlay.png"
-    loose_on_bg_png = output_dir / "glomerular_track_distribution_loose_on_slow_density.png"
-    strict_on_bg_png = output_dir / "glomerular_track_distribution_strict_on_slow_density.png"
+    density_npy = output_dir / "glomerular_track_density.npy"
+    distribution_png = output_dir / "glomerular_track_distribution.png"
+    on_bg_png = output_dir / "glomerular_track_distribution_on_slow_density.png"
 
-    np.save(loose_npy, loose_density)
-    np.save(strict_npy, strict_density)
-    _save_distribution_image(loose_png, loose_density, rgb=(255, 0, 255), title="Loose glomerular-track distribution")
-    _save_distribution_image(strict_png, strict_density, rgb=(0, 255, 255), title="Strict glomerular-track distribution")
-    _save_distribution_overlay(overlay_png, loose_density, strict_density)
+    np.save(density_npy, density)
+    _save_distribution_image(distribution_png, density, rgb=(255, 0, 255), title="Glomerular-track distribution")
     _save_distribution_on_background(
-        loose_on_bg_png,
-        loose_density,
+        on_bg_png,
+        density,
         slow_density,
         rgb=(255, 0, 255),
-        title="Loose glomerular-track distribution on slow density",
-    )
-    _save_distribution_on_background(
-        strict_on_bg_png,
-        strict_density,
-        slow_density,
-        rgb=(0, 255, 255),
-        title="Strict glomerular-track distribution on slow density",
+        title="Glomerular-track distribution on slow density",
     )
 
     return {
-        "loose_density": loose_npy,
-        "strict_density": strict_npy,
-        "loose_distribution": loose_png,
-        "strict_distribution": strict_png,
-        "overlay_distribution": overlay_png,
-        "loose_distribution_on_slow_density": loose_on_bg_png,
-        "strict_distribution_on_slow_density": strict_on_bg_png,
+        "density": density_npy,
+        "distribution": distribution_png,
+        "distribution_on_slow_density": on_bg_png,
     }
 
 
@@ -845,25 +818,6 @@ def _save_distribution_image(path: Path, density: np.ndarray, rgb: tuple[int, in
     fig, ax = plt.subplots(figsize=(8, 6), dpi=160)
     ax.imshow(_colorize_density(density, rgb))
     ax.set_title(title)
-    ax.set_axis_off()
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
-
-
-def _save_distribution_overlay(path: Path, loose_density: np.ndarray, strict_density: np.ndarray) -> None:
-    """保存 loose/strict 肾小球轨迹分布叠加图。"""
-
-    loose = _normalize_density(loose_density)
-    strict = _normalize_density(strict_density)
-    rgb = np.zeros((*loose_density.shape, 3), dtype=np.float32)
-    rgb[..., 0] = loose
-    rgb[..., 1] = strict
-    rgb[..., 2] = np.maximum(loose, strict)
-
-    fig, ax = plt.subplots(figsize=(8, 6), dpi=160)
-    ax.imshow(np.clip(rgb, 0, 1))
-    ax.set_title("Glomerular-track distribution overlay: loose=magenta, strict=cyan")
     ax.set_axis_off()
     fig.tight_layout()
     fig.savefig(path)
@@ -951,10 +905,8 @@ def _save_visualizations(
     fast_vessel_mask_iso: np.ndarray,
     nd_map_iso: np.ndarray,
     metrics: pd.DataFrame,
-    loose_metrics: pd.DataFrame,
-    strict_metrics: pd.DataFrame,
-    loose_glomeruli: pd.DataFrame,
-    strict_glomeruli: pd.DataFrame,
+    selected_metrics: pd.DataFrame,
+    final_glomeruli: pd.DataFrame,
 ) -> None:
     """保存 Step 5 诊断图和最终中心 overlay。"""
 
@@ -977,15 +929,14 @@ def _save_visualizations(
         contours=[(glom_original, "lime", "glomerular mask"), (seed_original, "yellow", "seeds")],
         title="Glomerular mask and candidate seeds",
     )
-    _plot_centers(output_dir / "final_glomeruli_centers_loose.png", slow_bg, loose_glomeruli, cfg, "loose glomeruli")
-    _plot_centers(output_dir / "final_glomeruli_centers_strict.png", slow_bg, strict_glomeruli, cfg, "strict glomeruli")
+    _plot_centers(output_dir / "final_glomeruli_centers.png", slow_bg, final_glomeruli, cfg, "glomeruli")
     _plot_overlay(
         output_dir / "fast_exclusion_overlay.png",
         fast_bg,
         contours=[(fast_mask_original, "red", "fast vessel exclude")],
         title="Fast vessel exclusion",
     )
-    _plot_track_diagnostics(output_dir / "track_filter_diagnostics.png", slow_bg, metrics, loose_metrics, strict_metrics, cfg)
+    _plot_track_diagnostics(output_dir / "track_filter_diagnostics.png", slow_bg, metrics, selected_metrics, cfg)
 
 
 def _background(density: np.ndarray | None, shape: tuple[int, int]) -> np.ndarray:
@@ -1056,20 +1007,17 @@ def _plot_track_diagnostics(
     path: Path,
     background: np.ndarray,
     metrics: pd.DataFrame,
-    loose_metrics: pd.DataFrame,
-    strict_metrics: pd.DataFrame,
+    selected_metrics: pd.DataFrame,
     cfg: Step5Config,
 ) -> None:
-    """显示所有慢速中心、loose 中心、strict 中心的对比。"""
+    """显示所有慢速中心和最终候选中心的对比。"""
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=160)
     ax.imshow(_normalize_for_display(background), cmap="gray")
     if not metrics.empty:
         ax.scatter(metrics["center_x_mm"] / cfg.x_spacing_mm, metrics["center_y_mm"] / cfg.y_spacing_mm, s=2, c="white", alpha=0.25, label="all slow")
-    if not loose_metrics.empty:
-        ax.scatter(loose_metrics["center_x_mm"] / cfg.x_spacing_mm, loose_metrics["center_y_mm"] / cfg.y_spacing_mm, s=6, c="deepskyblue", alpha=0.8, label="loose tracks")
-    if not strict_metrics.empty:
-        ax.scatter(strict_metrics["center_x_mm"] / cfg.x_spacing_mm, strict_metrics["center_y_mm"] / cfg.y_spacing_mm, s=10, c="yellow", alpha=0.9, label="strict tracks")
+    if not selected_metrics.empty:
+        ax.scatter(selected_metrics["center_x_mm"] / cfg.x_spacing_mm, selected_metrics["center_y_mm"] / cfg.y_spacing_mm, s=6, c="deepskyblue", alpha=0.8, label="glomerular tracks")
     ax.legend(loc="upper right", fontsize=7)
     ax.set_title("Track filter diagnostics")
     ax.set_axis_off()
