@@ -25,7 +25,7 @@ mouse_dcm/
 output/
 
 # Extracted or temporary document artifacts
-docx_extract/
+masks/
 
 # Build / packaging
 build/

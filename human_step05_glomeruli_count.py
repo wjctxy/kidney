@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.patches import Ellipse
+from matplotlib.path import Path as MplPath
 from scipy import ndimage
 from skimage import measure, morphology
 from sklearn.cluster import DBSCAN
@@ -1111,36 +1112,104 @@ def _load_array(path: str | Path | None) -> np.ndarray | None:
     return image.astype(np.float32)
 
 
-def main() -> None:
-    """命令行示例入口：读取 CSV/NPY 并运行 Step 5。"""
+def draw_mask_from_image(
+    image_path: str | Path,
+    output_path: str | Path,
+    overlay_path: str | Path,
+    mode: str,
+) -> dict[str, Any]:
+    """在输入图像上交互式绘制 polygon mask，并保存 mask、overlay 和 log。"""
 
-    parser = argparse.ArgumentParser(description="Step 5 glomeruli candidate mask and counting")
-    parser.add_argument("--slow-tracks", required=True, help="慢速轨迹 CSV，例如 human_slow_tracks.csv 或 mouse_slow_tracks.csv")
-    parser.add_argument("--fast-tracks", help="可选快速轨迹 CSV；没有 fast_density 时用于生成主血管排除 density")
-    parser.add_argument("--slow-density", help="可选 slow_density.npy 或 PNG，用于 overlay")
-    parser.add_argument("--fast-density", help="可选 fast_density.npy 或 PNG，用于主血管排除")
-    parser.add_argument("--cortex-mask", help="可选 cortex_mask.npy，原始图像坐标 bool mask")
-    parser.add_argument("--exclude-mask", help="可选 exclude_mask.npy，原始图像坐标 bool mask")
-    parser.add_argument("--output-dir", default="step5_outputs")
-    parser.add_argument("--config-json", help="可选 JSON 配置覆盖 Step5Config")
+    image_path = Path(image_path)
+    output_path = Path(output_path)
+    overlay_path = Path(overlay_path)
+    if mode not in {"cortex", "exclude"}:
+        raise ValueError("mode 必须是 cortex 或 exclude")
+
+    image = _load_array(image_path)
+    if image is None:
+        raise ValueError("image 不能为空")
+    display = _normalize_for_display(image)
+    mask = np.zeros(display.shape, dtype=bool)
+    polygons: list[np.ndarray] = []
+
+    while True:
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.imshow(display, cmap="gray")
+        if mask.any():
+            ax.contour(mask.astype(float), levels=[0.5], colors="lime", linewidths=1.2)
+        ax.set_title(f"{mode} mask: click polygon points, Enter to finish; empty Enter to save")
+        ax.set_axis_off()
+        points = plt.ginput(n=-1, timeout=0)
+        plt.close(fig)
+
+        if len(points) == 0:
+            break
+        if len(points) < 3:
+            print("polygon 少于 3 个点，已忽略。")
+            continue
+
+        polygon = np.asarray(points, dtype=np.float32)
+        polygons.append(polygon)
+        mask |= _polygon_to_mask(polygon, display.shape)
+        print(f"added polygon {len(polygons)}: points={len(points)}, mask_pixels={int(mask.sum())}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    overlay_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(output_path, mask.astype(bool))
+    _save_mask_overlay(display, mask, overlay_path, mode)
+
+    summary = {
+        "mode": mode,
+        "image": str(image_path),
+        "output": str(output_path),
+        "overlay": str(overlay_path),
+        "shape": [int(mask.shape[0]), int(mask.shape[1])],
+        "polygon_count": int(len(polygons)),
+        "mask_true_pixels": int(mask.sum()),
+    }
+    log_path = output_path.with_suffix(".log.json")
+    log_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return summary
+
+
+def _polygon_to_mask(polygon: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """把 x/y 顶点 polygon rasterize 成 bool mask。"""
+
+    height, width = shape
+    yy, xx = np.mgrid[:height, :width]
+    points = np.column_stack((xx.ravel(), yy.ravel()))
+    path = MplPath(polygon)
+    return path.contains_points(points).reshape(shape)
+
+
+def _save_mask_overlay(image: np.ndarray, mask: np.ndarray, path: str | Path, mode: str) -> None:
+    """保存背景图和 mask 轮廓 overlay。"""
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.imshow(image, cmap="gray")
+    if mask.any():
+        color = "cyan" if mode == "cortex" else "red"
+        ax.contour(mask.astype(float), levels=[0.5], colors=color, linewidths=1.2)
+    ax.set_title(f"{mode} mask overlay")
+    ax.set_axis_off()
+    fig.tight_layout()
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+
+
+def main() -> None:
+    """命令行入口：在 Step04 图像上交互式绘制 cortex/exclude mask。"""
+
+    parser = argparse.ArgumentParser(description="Step 5 mask drawing")
+    parser.add_argument("--image", required=True, help="用于绘制 mask 的背景图像，例如 human_density_slow.png")
+    parser.add_argument("--output", required=True, help="输出 bool mask npy 路径")
+    parser.add_argument("--overlay", required=True, help="输出 overlay PNG 路径")
+    parser.add_argument("--mode", choices=["cortex", "exclude"], required=True, help="mask 类型")
     args = parser.parse_args()
 
-    config = None
-    if args.config_json:
-        with Path(args.config_json).open("r", encoding="utf-8") as f:
-            config = json.load(f)
-
-    result = run_step5_glomeruli_count(
-        slow_tracks=args.slow_tracks,
-        fast_tracks=args.fast_tracks,
-        slow_density=_load_array(args.slow_density),
-        fast_density=_load_array(args.fast_density),
-        cortex_mask=_load_array(args.cortex_mask),
-        exclude_mask=_load_array(args.exclude_mask),
-        config=config,
-        output_dir=args.output_dir,
-    )
-    print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
+    draw_mask_from_image(args.image, args.output, args.overlay, args.mode)
 
 
 if __name__ == "__main__":
