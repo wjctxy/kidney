@@ -25,6 +25,11 @@ from skimage import measure, morphology
 from sklearn.cluster import DBSCAN
 
 
+DEFAULT_EXEC_LABEL = "stable_200_400"
+DEFAULT_BASE_DIR = Path("human_dcm")
+DEFAULT_MASKS_DIR = Path("masks")
+
+
 @dataclass
 class Step5Config:
     """Step 5 的所有物理尺度和阈值配置。"""
@@ -41,10 +46,10 @@ class Step5Config:
     gaussian_sigma_radius_ratio: float = 0.5
     min_track_length_points: int = 3
     min_duration_sec: float = 0.10
-    dbscan_eps_mm: float = 0.19
+    dbscan_eps_mm: float = 0.17
     dbscan_min_samples: int = 1
-    fast_vessel_percentile: float = 98.0
-    fast_vessel_dilate_mm: float = 0.06
+    fast_vessel_percentile: float = 99.5
+    fast_vessel_dilate_mm: float = 0.0
     border_margin_mm: float = 0.20
     projection_mode: str = "center"
     min_component_area_factor: float = 0.25
@@ -418,7 +423,9 @@ def _fast_vessel_mask_iso(
     threshold = float(np.percentile(values, cfg.fast_vessel_percentile))
     mask_original = density >= threshold
     mask_iso = _mask_original_to_iso(mask_original, iso_shape, cfg)
-    dilate_px = max(1, int(math.ceil(cfg.fast_vessel_dilate_mm / cfg.iso_spacing_mm)))
+    if cfg.fast_vessel_dilate_mm <= 0:
+        return mask_iso
+    dilate_px = int(math.ceil(cfg.fast_vessel_dilate_mm / cfg.iso_spacing_mm))
     return morphology.dilation(mask_iso, morphology.disk(dilate_px))
 
 
@@ -696,8 +703,11 @@ def _many_centers_near_fast_vessels(
 
     if centers.empty or not fast_vessel_mask_iso.any():
         return False
-    radius_px = max(1, int(math.ceil(cfg.fast_vessel_dilate_mm / cfg.iso_spacing_mm)))
-    near_mask = morphology.dilation(fast_vessel_mask_iso, morphology.disk(radius_px))
+    if cfg.fast_vessel_dilate_mm <= 0:
+        near_mask = fast_vessel_mask_iso
+    else:
+        radius_px = int(math.ceil(cfg.fast_vessel_dilate_mm / cfg.iso_spacing_mm))
+        near_mask = morphology.dilation(fast_vessel_mask_iso, morphology.disk(radius_px))
     x = np.clip(np.rint(centers["center_x_mm"].to_numpy() / cfg.iso_spacing_mm).astype(int), 0, near_mask.shape[1] - 1)
     y = np.clip(np.rint(centers["center_y_mm"].to_numpy() / cfg.iso_spacing_mm).astype(int), 0, near_mask.shape[0] - 1)
     return float(np.mean(near_mask[y, x])) > 0.2
@@ -1147,17 +1157,99 @@ def _save_mask_overlay(image: np.ndarray, mask: np.ndarray, path: str | Path, mo
     plt.close(fig)
 
 
-def main() -> None:
-    """命令行入口：在 Step04 图像上交互式绘制 cortex/exclude mask。"""
+def run_step5_from_cli_defaults(
+    label: str | None = DEFAULT_EXEC_LABEL,
+    base_dir: str | Path = "human_dcm",
+    masks_dir: str | Path = "masks",
+    step04_dir: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    slow_tracks: str | Path | None = None,
+    fast_tracks: str | Path | None = None,
+    slow_density: str | Path | None = None,
+    fast_density: str | Path | None = None,
+    cortex_mask: str | Path | None = None,
+    exclude_mask: str | Path | None = None,
+) -> dict[str, Any]:
+    """按 Human pipeline 默认目录运行 Step05 计数。"""
 
-    parser = argparse.ArgumentParser(description="Step 5 mask drawing")
-    parser.add_argument("--image", required=True, help="用于绘制 mask 的背景图像，例如 human_density_slow.png")
-    parser.add_argument("--output", required=True, help="输出 bool mask npy 路径")
-    parser.add_argument("--overlay", required=True, help="输出 overlay PNG 路径")
-    parser.add_argument("--mode", choices=["cortex", "exclude"], required=True, help="mask 类型")
+    base_path = Path(base_dir)
+    label = label or DEFAULT_EXEC_LABEL
+    step04_path = Path(step04_dir) if step04_dir is not None else base_path / "step04_density_metrics" / label
+    output_path = Path(output_dir) if output_dir is not None else base_path / "step05_glomeruli_count" / label
+    masks_path = Path(masks_dir)
+
+    slow_tracks_path = Path(slow_tracks) if slow_tracks is not None else step04_path / "human_slow_tracks.csv"
+    fast_tracks_path = Path(fast_tracks) if fast_tracks is not None else step04_path / "human_rapid_tracks.csv"
+    slow_density_path = Path(slow_density) if slow_density is not None else step04_path / "human_density_slow.png"
+    fast_density_path = Path(fast_density) if fast_density is not None else step04_path / "human_density_rapid.png"
+    cortex_mask_path = Path(cortex_mask) if cortex_mask is not None else masks_path / "cortex_mask.npy"
+    exclude_mask_path = Path(exclude_mask) if exclude_mask is not None else masks_path / "exclude_mask.npy"
+
+    outputs = run_step5_glomeruli_count(
+        slow_tracks=slow_tracks_path,
+        fast_tracks=fast_tracks_path,
+        slow_density=_load_array(slow_density_path),
+        fast_density=_load_array(fast_density_path),
+        cortex_mask=_load_array(cortex_mask_path),
+        exclude_mask=_load_array(exclude_mask_path),
+        output_dir=output_path,
+    )
+
+    print(f"label: {label}")
+    print(f"step04_dir: {step04_path}")
+    print(f"output_dir: {output_path}")
+    print(f"summary: {output_path / 'summary.json'}")
+    print(f"final_glomeruli: {output_path / 'final_glomeruli.csv'}")
+    print(f"filtered_points: {output_path / 'filtered_points.csv'}")
+    print(f"glomerular_track_distribution: {outputs['glomerular_track_distribution']['distribution']}")
+    return outputs
+
+
+def main() -> None:
+    """命令行入口：绘制 cortex/exclude mask，或直接执行 Step05 计数。"""
+
+    parser = argparse.ArgumentParser(description="Step 5 mask drawing or glomeruli counting")
+    parser.add_argument("--mode", choices=["cortex", "exclude", "exec"], required=True, help="cortex/exclude 画 mask；exec 运行 Step05 计数")
+    parser.add_argument("--image", help=f"画 mask 模式使用：背景图像；默认读取 {DEFAULT_EXEC_LABEL} 的 human_density_slow.png")
+    parser.add_argument("--output", help="画 mask 模式使用：覆盖默认 bool mask npy 路径")
+    parser.add_argument("--overlay", help="画 mask 模式使用：覆盖默认 overlay PNG 路径")
+    parser.add_argument("--label", default=DEFAULT_EXEC_LABEL, help=f"exec 模式使用：Human pipeline 输出 label；默认 {DEFAULT_EXEC_LABEL}")
+    parser.add_argument("--base-dir", type=Path, default=DEFAULT_BASE_DIR, help="Human 输出根目录")
+    parser.add_argument("--masks-dir", type=Path, default=DEFAULT_MASKS_DIR, help="默认 mask 目录")
+    parser.add_argument("--step04-dir", type=Path, default=None, help="exec 模式使用：覆盖 Step04 输入目录")
+    parser.add_argument("--output-dir", type=Path, default=None, help="exec 模式使用：覆盖 Step05 输出目录")
+    parser.add_argument("--slow-tracks", type=Path, default=None, help="exec 模式使用：覆盖 slow tracks CSV")
+    parser.add_argument("--fast-tracks", type=Path, default=None, help="exec 模式使用：覆盖 rapid/fast tracks CSV")
+    parser.add_argument("--slow-density", type=Path, default=None, help="exec 模式使用：覆盖 slow density 图像或 npy")
+    parser.add_argument("--fast-density", type=Path, default=None, help="exec 模式使用：覆盖 rapid/fast density 图像或 npy")
+    parser.add_argument("--cortex-mask", type=Path, default=None, help="exec 模式使用：覆盖 cortex_mask.npy")
+    parser.add_argument("--exclude-mask", type=Path, default=None, help="exec 模式使用：覆盖 exclude_mask.npy")
     args = parser.parse_args()
 
-    draw_mask_from_image(args.image, args.output, args.overlay, args.mode)
+    if args.mode in {"cortex", "exclude"}:
+        image_path = (
+            Path(args.image)
+            if args.image is not None
+            else args.base_dir / "step04_density_metrics" / args.label / "human_density_slow.png"
+        )
+        output_path = Path(args.output) if args.output is not None else args.masks_dir / f"{args.mode}_mask.npy"
+        overlay_path = Path(args.overlay) if args.overlay is not None else args.masks_dir / f"{args.mode}_mask_overlay.png"
+        draw_mask_from_image(image_path, output_path, overlay_path, args.mode)
+        return
+
+    run_step5_from_cli_defaults(
+        label=args.label,
+        base_dir=args.base_dir,
+        masks_dir=args.masks_dir,
+        step04_dir=args.step04_dir,
+        output_dir=args.output_dir,
+        slow_tracks=args.slow_tracks,
+        fast_tracks=args.fast_tracks,
+        slow_density=args.slow_density,
+        fast_density=args.fast_density,
+        cortex_mask=args.cortex_mask,
+        exclude_mask=args.exclude_mask,
+    )
 
 
 if __name__ == "__main__":

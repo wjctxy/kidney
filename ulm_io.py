@@ -9,11 +9,13 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pydicom
+from pydicom.encaps import generate_frames
 from numpy.lib.format import open_memmap
 from pydicom.pixel_data_handlers.util import convert_color_space
 from pydicom.pixels import pixel_array as read_pixel_array
@@ -120,6 +122,7 @@ def dicom_to_frames(
     frames_path: str | Path,
     metadata_path: str | Path,
     max_frames: int | None = None,
+    source_frame_start: int = 0,
 ) -> tuple[Path, Path]:
     """把冗余 DICOM cine-loop 转换为统一算法输入。
 
@@ -132,9 +135,22 @@ def dicom_to_frames(
     frames_path = Path(frames_path)
     metadata_path = Path(metadata_path)
     ds, metadata = read_dicom_metadata(dicom_path)
-    n_frames = int(metadata["number_of_frames"])
+    color_space = _resolve_color_space_handling(dicom_path, ds)
+    metadata["color_space_handling"] = color_space
+    total_frames = int(metadata["number_of_frames"])
+    if source_frame_start < 0:
+        raise ValueError(f"source_frame_start 必须大于等于 0，当前为 {source_frame_start}")
+    if source_frame_start >= total_frames:
+        raise ValueError(f"source_frame_start={source_frame_start} 超出 DICOM 总帧数 {total_frames}")
+
+    n_frames = total_frames - source_frame_start
     if max_frames is not None:
         n_frames = min(n_frames, max_frames)
+    if n_frames <= 0:
+        raise ValueError(f"没有可保存的帧：source_frame_start={source_frame_start}, max_frames={max_frames}")
+    metadata["source_frame_start"] = int(source_frame_start)
+    metadata["source_frame_end_exclusive"] = int(source_frame_start + n_frames)
+    metadata["source_frame_end_inclusive"] = int(source_frame_start + n_frames - 1)
     metadata["frames_saved"] = n_frames
 
     frames_path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,8 +163,9 @@ def dicom_to_frames(
 
     roi = metadata["roi"]
     for frame_id in range(n_frames):
-        frame = read_pixel_array(dicom_path, index=frame_id)
-        prepared = _prepare_frame(frame, ds)
+        source_frame_id = source_frame_start + frame_id
+        frame = _read_frame_pixels(dicom_path, source_frame_id, color_space)
+        prepared = _prepare_frame(frame)
         cropped = prepared[roi["y0"] : roi["y1"], roi["x0"] : roi["x1"]]
         out[frame_id] = cropped.astype(np.float32) / 255.0
     out.flush()
@@ -185,7 +202,83 @@ def _read_pixel_size(ds: pydicom.Dataset) -> tuple[float, float]:
     return config.DEFAULT_PIXEL_SIZE_X, config.DEFAULT_PIXEL_SIZE_Y
 
 
-def _prepare_frame(frame: np.ndarray, ds: pydicom.Dataset) -> np.ndarray:
+def _resolve_color_space_handling(dicom_path: Path, ds: pydicom.Dataset) -> dict[str, Any]:
+    """决定 DICOM 像素读取和颜色空间转换策略。"""
+
+    photo = str(getattr(ds, "PhotometricInterpretation", ""))
+    samples_per_pixel = int(getattr(ds, "SamplesPerPixel", 1))
+    transfer_syntax = str(getattr(ds.file_meta, "TransferSyntaxUID", ""))
+    handling: dict[str, Any] = {
+        "dicom_photometric_interpretation": photo,
+        "samples_per_pixel": samples_per_pixel,
+        "transfer_syntax_uid": transfer_syntax,
+        "decoder_raw": False,
+        "convert_from": None,
+        "convert_to": None,
+        "reason": "single_channel" if samples_per_pixel == 1 else "use_dicom_photometric_interpretation",
+    }
+
+    if samples_per_pixel == 1:
+        return handling
+
+    if photo.startswith("YBR"):
+        handling.update(
+            {
+                "decoder_raw": True,
+                "convert_from": photo,
+                "convert_to": "RGB",
+                "reason": "dicom_photometric_is_ybr",
+            }
+        )
+        return handling
+
+    if photo == "RGB" and _first_encapsulated_frame_has_jfif_marker(dicom_path, ds):
+        handling.update(
+            {
+                "decoder_raw": True,
+                "convert_from": "YBR_FULL_422",
+                "convert_to": "RGB",
+                "reason": "rgb_tag_with_jfif_ybr_codestream",
+            }
+        )
+    return handling
+
+
+def _first_encapsulated_frame_has_jfif_marker(dicom_path: Path, ds: pydicom.Dataset) -> bool:
+    """检查压缩 JPEG 首帧是否带 JFIF APP marker。"""
+
+    transfer_syntax = getattr(ds.file_meta, "TransferSyntaxUID", None)
+    if transfer_syntax is None or not transfer_syntax.is_compressed:
+        return False
+    try:
+        pixel_ds = pydicom.dcmread(dicom_path, stop_before_pixels=False, specific_tags=["PixelData"])
+        first_frame = next(generate_frames(pixel_ds.PixelData, number_of_frames=1))
+    except Exception:
+        return False
+    return b"JFIF\x00" in first_frame[:128]
+
+
+def _read_frame_pixels(dicom_path: Path, frame_id: int, color_space: dict[str, Any]) -> np.ndarray:
+    """读取单帧并按已解析的颜色空间策略返回 RGB 或单通道像素。"""
+
+    use_raw = bool(color_space["decoder_raw"])
+    with warnings.catch_warnings():
+        if color_space.get("reason") == "rgb_tag_with_jfif_ybr_codestream":
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*Photometric Interpretation.*RGB.*JFIF.*YBR_FULL_422.*",
+                category=UserWarning,
+            )
+        frame = read_pixel_array(dicom_path, index=frame_id, raw=use_raw)
+
+    convert_from = color_space.get("convert_from")
+    convert_to = color_space.get("convert_to")
+    if convert_from and convert_to:
+        return convert_color_space(frame, str(convert_from), str(convert_to))
+    return frame
+
+
+def _prepare_frame(frame: np.ndarray) -> np.ndarray:
     """将单帧 DICOM 像素转为 uint8 单通道算法输入。
 
     彩色 CEUS DICOM 通常是设备显示后的伪彩色视频。直接做 RGB 灰度会把
@@ -194,9 +287,6 @@ def _prepare_frame(frame: np.ndarray, ds: pydicom.Dataset) -> np.ndarray:
     """
 
     if frame.ndim == 3 and frame.shape[-1] == 3:
-        photo = getattr(ds, "PhotometricInterpretation", "")
-        if str(photo).startswith("YBR"):
-            frame = convert_color_space(frame, photo, "RGB")
         return _rgb_to_ceus_score_uint8(frame)
 
     gray = frame.astype(np.float32)

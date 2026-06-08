@@ -51,8 +51,10 @@ human_dcm/step00_preprocess/preview_frame_000.png
 Akebia-style 双 profile 入口：
 
 ```bash
-python human_run_profiles.py --label stable_200_400
+python human_run_profiles.py --source-frame-start 200
 ```
+
+默认会扫描项目根目录下唯一的 `.dcm/.dicom`，从 `--source-frame-start` 开始截取 `--frame-count 200` 帧。未指定 `--label` 时，输出标签会按 DICOM 文件名和源帧范围自动生成；如需沿用旧目录名，可显式传 `--label stable_200_400 --source-frame-start 200 --frame-count 201`。
 
 该入口会从同一个 Step00 输入分别运行 Rapid 和 Slow：
 
