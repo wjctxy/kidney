@@ -23,9 +23,12 @@ env/
 human_dcm/
 mouse_dcm/
 output/
+all_masks/
 
 # Extracted or temporary document artifacts
 masks/
+archive/healthy_step05_runs/
+archive/healthy_common_step05_params.json
 
 # Build / packaging
 build/

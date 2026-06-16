@@ -1,172 +1,182 @@
 # Kidney ULM Processing
 
-本项目按 `archive/超声定位显微镜技术应用_整理版.md` 整理为两条 ULM 后处理链路：
-
-- 人类链路：时域带通滤波 → 二维高斯滤波 → 正向峰值检测与追踪 → 速度分组、密度图和指标
-- 小鼠链路：SVD 滤波 → 径向对称法亚像素定位 → 匈牙利追踪与重建
-
-当前只有人类样例 `11.0.dcm`。为了保持目录结构一致，该 DICOM 会分别放在：
+本仓库用于运行肾脏 CEUS/ULM 后处理流程。当前推荐主线是：
 
 ```text
-human_dcm/11.0.dcm
-mouse_dcm/11.0.dcm
+DICOM
+-> Step00 TIC 选稳定连续帧
+-> Human rapid/slow Step01-04
+-> Step05 cortex/exclude mask
+-> Step05 肾小球候选计数
 ```
 
-这些目录包含大文件和生成结果，已写入 `.gitignore`。
+`human_dcm/` 只保存当前最新一次运行的中间结果；长期保留的样本 DICOM 和 mask 放在 `all_masks/`。
 
-## 统一接口
+## 推荐入口
 
-所有算法 step 之间只传结构化数据：
-
-```text
-step00_preprocess/frames.npy        float32 [T,H,W]，CEUS score/灰度、裁剪 ROI、归一化到 [0,1]
-step00_preprocess/metadata.json     fps、像素尺寸、ROI、帧数等元数据
-step02_gaussian_filter/*_smoothed.npy Akebia 式局部极大值搜索用 Gaussian guide
-step03_track/*_detections.csv       每行一个微泡候选点
-step03_track/*tracks.csv              每行一个轨迹点
-step04_density_metrics/*metrics.csv   轨迹指标和密度图结果
-```
-
-PNG 只作为最终可视化结果，不作为任何下游 step 的输入。
-
-## Step 0：预处理
+把样本 DICOM 放进 `all_masks/` 或直接用 `--dicom` 登记：
 
 ```bash
-python step00_preprocess.py --kind human
-python step00_preprocess.py --kind mouse
+.venv/bin/python step00_preprocess.py --kind human --run-full-pipeline --sample 21.0
 ```
+
+或：
+
+```bash
+.venv/bin/python step00_preprocess.py --kind human --run-full-pipeline --dicom 21.0.dcm
+```
+
+样本目录约定：
+
+```text
+all_masks/
+  21.0/
+    21.0.dcm
+    cortex_mask.npy
+    cortex_mask_overlay.png
+    cortex_mask.log.json
+    exclude_mask.npy
+    exclude_mask_overlay.png
+    exclude_mask.log.json
+```
+
+如果缺 `cortex_mask.npy` 或 `exclude_mask.npy`，全流程会先跑到 Step04，用慢速密度图进入交互式 mask 绘制；保存后默认重新从 Step00 开始，用 cortex 内 TIC 选最终帧段。
+
+## Step00
+
+单独运行预处理：
+
+```bash
+.venv/bin/python step00_preprocess.py --kind human
+.venv/bin/python step00_preprocess.py --kind human --target-frames 400
+```
+
+默认设置在 `step00_preprocess.py` 顶部：
+
+```text
+DEFAULT_TARGET_FRAMES = 200
+DEFAULT_MIN_FRAMES = 200
+DEFAULT_SMOOTH_WINDOW = 15
+DEFAULT_BASELINE_SECONDS = 2.0
+DEFAULT_MIN_ENHANCEMENT = 0.01
+```
+
+Step00 会先读取完整 DICOM 并计算 TIC(time-intensity curve)。有 cortex mask 时，TIC 是 cortex 内平均 CEUS score；没有 mask 时，TIC 退回完整 ROI 平均值。默认选择 200 帧连续稳定窗口，不再默认取前 600 帧，也不按总帧数比例取帧。
 
 输出：
 
 ```text
 human_dcm/step00_preprocess/frames.npy
 human_dcm/step00_preprocess/metadata.json
+human_dcm/step00_preprocess/tic_raw.npy
+human_dcm/step00_preprocess/tic_selection.png
+human_dcm/step00_preprocess/selected_ranges.json
 human_dcm/step00_preprocess/preview_frame_000.png
 ```
 
-`step0` 会读取 DICOM 中的超声区域标签，裁掉设备界面等冗余信息。彩色伪彩 CEUS 会转成橙黄色造影增强 score；单通道 DICOM 会按灰度强度归一化。
+## Human Step01-04
 
-## 人类链路
+全流程入口会自动跑 rapid/slow 两套 profile。新样本统一使用 `step00_preprocess.py --run-full-pipeline`，
+旧的 label 型入口已删除。
 
-Akebia-style 双 profile 入口：
-
-```bash
-python human_run_profiles.py --source-frame-start 200
-```
-
-默认会扫描项目根目录下唯一的 `.dcm/.dicom`，从 `--source-frame-start` 开始截取 `--frame-count 200` 帧。未指定 `--label` 时，输出标签会按 DICOM 文件名和源帧范围自动生成；如需沿用旧目录名，可显式传 `--label stable_200_400 --source-frame-start 200 --frame-count 201`。
-
-该入口会从同一个 Step00 输入分别运行 Rapid 和 Slow：
+Rapid/slow 参数定义在 `ulm_config.py` 的 `HUMAN_PROFILES`：
 
 ```text
-Rapid: bandpass [1, 5.5] Hz, maxLinkingDistance=15, minLength=5
-Slow: no bandpass, maxLinkingDistance=4, minLength=10
+rapid: bandpass [1.0, 5.5] Hz, max displacement 15 px/frame, min length 5
+slow:  no bandpass, max displacement 4 px/frame,  min length 10
 ```
 
-也可以逐步运行单 profile：
-
-```bash
-python human_step01_bandpass.py
-python human_step02_gaussian_filter.py
-python human_step03_track.py
-python human_step04_density_metrics.py
-```
-
-输出集中在 `human_dcm/` 的分 step 子目录：
+Step04 主要输出：
 
 ```text
-step01_bandpass/human_filtered.npy
-step01_bandpass/signed_bandpass_frame_XXXX.png
-step01_bandpass/raw_vs_signed_bandpass_frame_comparison.png
-step01_bandpass/bandpass_std_projection.png
-step01_bandpass/bandpass_temporal_curve_center.png
-step01_bandpass/bandpass_temporal_curve_max_std.png
-step01_bandpass/bandpass_stats.json
-step02_gaussian_filter/human_smoothed.npy
-step02_gaussian_filter/signed_smoothed_frame_XXXX.png
-step02_gaussian_filter/bandpass_vs_gaussian_frame_comparison.png
-step02_gaussian_filter/gaussian_stats.json
-step03_track/human_detections.csv
-step03_track/detections_positive_response_frame_XXXX.png
-step03_track/human_tracks.csv
-step03_track/tracking_summary.txt
-step04_density_metrics/human_low_speed_tracks.csv
-step04_density_metrics/human_high_speed_tracks.csv
-step04_density_metrics/human_density_total.png
-step04_density_metrics/human_density_low_speed.png
-step04_density_metrics/human_density_high_speed.png
-step04_density_metrics/human_density_speed_overlay.png
-step04_density_metrics/human_metrics.csv
-step04_density_metrics/human_summary.txt
+human_dcm/step04_density_metrics/human_density_total.png
+human_dcm/step04_density_metrics/human_density_rapid.png
+human_dcm/step04_density_metrics/human_density_slow.png
+human_dcm/step04_density_metrics/human_rapid_tracks.csv
+human_dcm/step04_density_metrics/human_slow_tracks.csv
+human_dcm/step04_density_metrics/human_metrics.csv
+human_dcm/step04_density_metrics/human_summary.txt
 ```
 
-## 小鼠链路
+## Step05 Mask 和计数
+
+当前 mask 绘制和计数都在 `human_step05_glomeruli_count.py`：
 
 ```bash
-python mouse_step01_svd_filter.py
-python mouse_step02_radial_symmetry_detect.py
-python mouse_step03_track_reconstruct.py
+.venv/bin/python human_step05_glomeruli_count.py --mode cortex
+.venv/bin/python human_step05_glomeruli_count.py --mode exclude
+.venv/bin/python human_step05_glomeruli_count.py --mode exec
 ```
 
-输出集中在 `mouse_dcm/`。当前没有真实小鼠样例，因此这条链路只按接口和算法要求实现，未用小鼠数据校准参数。
+默认背景图是当前 Step04 输出：
 
-## Step 5：肾小球候选计数
-
-`human_step05_glomeruli_count.py` 使用慢速轨迹的 normalized distance 在物理坐标和 isotropic grid 上生成肾小球候选 mask，再反向筛选肾小球相关轨迹点、重建轨迹分布图，并用 DBSCAN 聚类计数。核心鼠类参数默认是 `glomerulus_radius_mm=0.05`、`iso_spacing_mm=0.02`。
-
-当前 Step 5 使用单一候选集计数，已按 CT 层扫切片约 450 个肾小球标定：`dbscan_eps_mm=0.19`、`dbscan_min_samples=1`。旧版 loose/strict 双输出已移除，避免同一结果同时存在两套口径。
-
-交互式制作 cortex/exclude mask：
-
-```bash
-python draw_step5_masks.py \
-  --image human_dcm/step04_density_metrics/stable_200_400/human_density_slow.png \
-  --output masks/cortex_mask.npy \
-  --overlay masks/cortex_mask_overlay.png \
-  --mode cortex
-
-python draw_step5_masks.py \
-  --image human_dcm/step04_density_metrics/stable_200_400/human_density_slow.png \
-  --output masks/exclude_mask.npy \
-  --overlay masks/exclude_mask_overlay.png \
-  --mode exclude
+```text
+human_dcm/step04_density_metrics/human_density_slow.png
 ```
 
-快捷键：`Enter` 完成当前 polygon，`n` 新建下一个 polygon，`u` 撤销上一个 polygon，`s` 保存，`q` 退出。mask 会保持输入 density/image 的原始 shape，Step 5 内部会负责转换到 isotropic grid。
+默认 mask 输出：
 
-也可以直接使用已打包的 macOS 可执行版：
-
-```bash
-step5/app/dist/Step5MaskDrawer/Step5MaskDrawer.exe \
-  --image human_dcm/step04_density_metrics/stable_200_400/human_density_slow.png \
-  --output masks/cortex_mask.npy \
-  --overlay masks/cortex_mask_overlay.png \
-  --mode cortex
+```text
+masks/cortex_mask.npy
+masks/cortex_mask_overlay.png
+masks/cortex_mask.log.json
+masks/exclude_mask.npy
+masks/exclude_mask_overlay.png
+masks/exclude_mask.log.json
 ```
 
-```bash
-python human_step05_glomeruli_count.py \
-  --slow-tracks human_dcm/step04_density_metrics/stable_200_400/human_slow_tracks.csv \
-  --fast-tracks human_dcm/step04_density_metrics/stable_200_400/human_rapid_tracks.csv \
-  --slow-density human_dcm/step04_density_metrics/stable_200_400/human_density_slow.png \
-  --fast-density human_dcm/step04_density_metrics/stable_200_400/human_density_rapid.png \
-  --cortex-mask masks/cortex_mask.npy \
-  --exclude-mask masks/exclude_mask.npy \
-  --output-dir human_dcm/step05_glomeruli_count/stable_200_400
+`--mode exec` 默认读取：
+
+```text
+human_dcm/step04_density_metrics/human_slow_tracks.csv
+human_dcm/step04_density_metrics/human_rapid_tracks.csv
+human_dcm/step04_density_metrics/human_density_slow.png
+human_dcm/step04_density_metrics/human_density_rapid.png
+masks/cortex_mask.npy
+masks/exclude_mask.npy
 ```
 
-关键输出包括 `final_glomeruli.csv`、`filtered_points.csv`、`glomerular_track_distribution.png` 和 `glomerular_track_distribution_on_slow_density.png`。
+输出到：
 
-如果没有 `cortex_mask` 也能运行，但会在 `summary.json` 中记录误检风险 warning。
+```text
+human_dcm/step05_glomeruli_count/
+```
 
-## 快速烟测
-
-完整 DICOM 有 1802 帧。当前默认先处理 600 帧，兼顾滤波稳定性和运行时间；如需处理全部帧，使用 `--max-frames 0`。
+Step05 当前是单一候选集计数，旧版 loose/strict 双输出已移除。健康样本默认使用 `healthy_calibration`，会在 `0.04-0.30 mm` 内自动扫 DBSCAN `eps`，目标靠近 450 且优先避免低于 400。病肾/未知样本使用固定公共参数：
 
 ```bash
-python step00_preprocess.py --kind human
-python human_step01_bandpass.py
-python human_step02_gaussian_filter.py
-python human_step03_track.py
-python human_step04_density_metrics.py
+.venv/bin/python human_step05_glomeruli_count.py \
+  --mode exec \
+  --count-mode diagnostic \
+  --dbscan-eps-mm <healthy_common_eps>
+```
+
+## 健康样本公共参数
+
+全流程每跑完一个健康样本，会保存轻量 Step05 摘要：
+
+```text
+archive/healthy_step05_runs/<sample_id>_summary.json
+```
+
+多个健康样本跑完后统计公共诊断参数：
+
+```bash
+.venv/bin/python calibrate_healthy_step05_params.py
+```
+
+输出：
+
+```text
+archive/healthy_common_step05_params.json
+```
+
+## 文档索引
+
+```text
+archive/0.总览.md       当前完整流程和运行顺序
+archive/2.双路设计接口.md 当前 step 之间的接口
+archive/3.数据格式.md   当前文件格式和字段含义
+archive/8.step05.md     Step05 mask、计数、参数和输出解释
+archive/9.step00.md     Step00 TIC 选帧和样本管理
 ```

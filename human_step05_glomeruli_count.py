@@ -25,7 +25,6 @@ from skimage import measure, morphology
 from sklearn.cluster import DBSCAN
 
 
-DEFAULT_EXEC_LABEL = "stable_200_400"
 DEFAULT_BASE_DIR = Path("human_dcm")
 DEFAULT_MASKS_DIR = Path("masks")
 
@@ -47,6 +46,10 @@ class Step5Config:
     min_track_length_points: int = 3
     min_duration_sec: float = 0.10
     dbscan_eps_mm: float = 0.17
+    dbscan_eps_min_mm: float = 0.04
+    dbscan_eps_max_mm: float = 0.30
+    dbscan_eps_steps: int = 80
+    calibration_enabled: bool = True
     dbscan_min_samples: int = 1
     fast_vessel_percentile: float = 99.5
     fast_vessel_dilate_mm: float = 0.0
@@ -55,10 +58,11 @@ class Step5Config:
     min_component_area_factor: float = 0.25
     max_component_area_factor: float = 8.0
     cortex_inside_frac_min: float = 0.50
-    exclude_inside_frac_max: float = 0.0
+    exclude_inside_frac_max: float = 0.25
     distribution_super_res_factor: int = 4
     distribution_gaussian_sigma_px: float = 4.8
     calibration_target_count: int = 450
+    calibration_min_count: int = 400
 
 
 def run_step5_glomeruli_count(
@@ -104,6 +108,7 @@ def run_step5_glomeruli_count(
     cortex_iso_mask = _mask_original_to_iso(cortex_mask_bool, iso_shape, cfg)
     exclude_iso_mask = _mask_original_to_iso(exclude_mask_bool, iso_shape, cfg)
     border_iso_mask = _mask_original_to_iso(border_mask, iso_shape, cfg)
+    cortex_center_iso_mask = _strict_cortex_center_mask_iso(cortex_iso_mask, cfg)
     fast_vessel_mask_iso = _fast_vessel_mask_iso(fast_density, cortex_mask_bool, original_shape, iso_shape, cfg)
 
     metrics = _compute_track_metrics(slow_df, cortex_mask_bool, exclude_mask_bool, border_mask, cfg)
@@ -132,13 +137,19 @@ def run_step5_glomeruli_count(
 
     metrics = _add_glomerular_inside_fraction(metrics, slow_df, glomerular_mask_iso, iso_shape)
     metrics = _add_center_mask_flag(metrics, fast_vessel_mask_iso, "center_in_fast_vessel")
-    metrics["candidate_keep"] = metrics["roi_keep"] & ~metrics["center_in_fast_vessel"]
+    metrics = _add_center_mask_flag(metrics, cortex_center_iso_mask, "center_allows_full_glomerulus_in_cortex")
+    metrics["passes_strict_cortex_center"] = metrics["center_allows_full_glomerulus_in_cortex"]
+    metrics["candidate_keep"] = (
+        metrics["roi_keep"]
+        & metrics["passes_strict_cortex_center"]
+        & ~metrics["center_in_fast_vessel"]
+    )
     selected_metrics = metrics[metrics["candidate_keep"]].copy()
 
     filtered_points = _filtered_points(slow_df, metrics, selected_metrics)
 
-    final_glomeruli = _cluster_track_centers(selected_metrics, cfg)
-    per_block_counts = _per_block_counts(metrics, selected_metrics, cfg)
+    final_glomeruli, calibrated_eps_mm, calibration_info = _cluster_track_centers_calibrated(selected_metrics, cfg, cortex_center_iso_mask)
+    per_block_counts = _per_block_counts(metrics, selected_metrics, cfg, cortex_center_iso_mask)
 
     _remove_legacy_step5_outputs(output_path)
     _write_outputs(
@@ -154,6 +165,7 @@ def run_step5_glomeruli_count(
         glomerular_mask_iso,
         fast_vessel_mask_iso,
         cortex_iso_mask,
+        cortex_center_iso_mask,
         exclude_iso_mask,
     )
     distribution_paths = _write_glomerular_track_distribution_maps(
@@ -168,18 +180,39 @@ def run_step5_glomeruli_count(
         "total_slow_tracks": int(len(metrics)),
         "tracks_after_cortex_filter": int((metrics["passes_length"] & metrics["passes_duration"] & metrics["passes_cortex"]).sum()),
         "tracks_after_exclusion_filter": int(metrics["roi_keep"].sum()),
+        "tracks_after_strict_cortex_center_filter": int((metrics["roi_keep"] & metrics["passes_strict_cortex_center"]).sum()),
         "tracks_after_fast_vessel_filter": int(metrics["candidate_keep"].sum()),
         "glomerular_tracks": int(len(selected_metrics)),
         "glomeruli_count": int(len(final_glomeruli)),
         "iso_spacing_mm": float(cfg.iso_spacing_mm),
         "glomerulus_radius_mm": float(cfg.glomerulus_radius_mm),
         "radius_iso_px": float(radius_iso_px),
-        "dbscan_eps_mm": float(cfg.dbscan_eps_mm),
+        "dbscan_eps_mm": float(calibrated_eps_mm),
+        "dbscan_eps_default_mm": float(cfg.dbscan_eps_mm),
         "dbscan_min_samples": int(cfg.dbscan_min_samples),
+        "exclude_inside_frac_max": float(cfg.exclude_inside_frac_max),
+        "strict_cortex_containment": (
+            "final glomerulus centers must lie inside cortex eroded by glomerulus_radius_mm, "
+            "so the full glomerulus disk stays within cortex"
+        ),
         "calibration_target_count": int(cfg.calibration_target_count),
-        "calibration_note": "single candidate set calibrated toward expected CT slice glomerulus count around 450; masks are unchanged",
+        "calibration_min_count": int(cfg.calibration_min_count),
+        "calibration_info": calibration_info,
+        "calibration_note": (
+            "single candidate set calibrated toward expected CT slice glomerulus count around 450; masks are unchanged"
+            if cfg.calibration_enabled
+            else "diagnostic fixed-eps mode; count is not forced toward the healthy 400-450 range"
+        ),
         "warnings": warnings_list,
     }
+    if int(len(final_glomeruli)) < int(cfg.calibration_min_count):
+        _warn(
+            summary["warnings"],
+            (
+                "校准后计数仍低于 calibration_min_count；"
+                "说明候选慢速轨迹数量或 ROI/exclude 过滤本身不足，不能只靠 DBSCAN 半径补足。"
+            ),
+        )
     if _many_centers_near_fast_vessels(final_glomeruli, fast_vessel_mask_iso, cfg):
         _warn(summary["warnings"], "较多候选中心靠近 fast_vessel_mask；建议检查主血管排除阈值。")
 
@@ -195,6 +228,7 @@ def run_step5_glomeruli_count(
         glomerular_mask_iso,
         seed_mask_iso,
         fast_vessel_mask_iso,
+        cortex_center_iso_mask,
         nd_map_smooth_iso,
         metrics,
         selected_metrics,
@@ -213,6 +247,7 @@ def run_step5_glomeruli_count(
             "seed_mask_iso": seed_mask_iso,
             "fast_vessel_mask_iso": fast_vessel_mask_iso,
             "cortex_iso_mask": cortex_iso_mask,
+            "cortex_center_iso_mask": cortex_center_iso_mask,
             "exclude_iso_mask": exclude_iso_mask,
         },
     }
@@ -402,6 +437,16 @@ def _mask_iso_to_original(mask_iso: np.ndarray, original_shape: tuple[int, int],
     y_iso = np.clip(np.rint(np.arange(height) * cfg.y_spacing_mm / cfg.iso_spacing_mm).astype(int), 0, iso_h - 1)
     x_iso = np.clip(np.rint(np.arange(width) * cfg.x_spacing_mm / cfg.iso_spacing_mm).astype(int), 0, iso_w - 1)
     return mask_iso[y_iso[:, None], x_iso[None, :]].astype(bool)
+
+
+def _strict_cortex_center_mask_iso(cortex_iso_mask: np.ndarray, cfg: Step5Config) -> np.ndarray:
+    """生成严格 cortex 中心 mask：中心在此处时，完整肾小球圆盘不会越出 cortex。"""
+
+    radius_px = int(math.ceil(float(cfg.glomerulus_radius_mm) / max(float(cfg.iso_spacing_mm), 1e-12)))
+    if radius_px <= 0:
+        return cortex_iso_mask.astype(bool, copy=True)
+    disk = morphology.disk(radius_px)
+    return morphology.erosion(cortex_iso_mask.astype(bool), disk).astype(bool)
 
 
 def _fast_vessel_mask_iso(
@@ -628,8 +673,88 @@ def _filtered_points(points: pd.DataFrame, metrics: pd.DataFrame, selected_metri
     return subset
 
 
-def _cluster_track_centers(metrics: pd.DataFrame, cfg: Step5Config) -> pd.DataFrame:
+def _cluster_track_centers(
+    metrics: pd.DataFrame,
+    cfg: Step5Config,
+    cortex_center_iso_mask: np.ndarray | None = None,
+) -> pd.DataFrame:
     """用 DBSCAN 在 mm 坐标下对 track-level centers 聚类计数。"""
+
+    return _cluster_track_centers_with_eps(metrics, cfg, float(cfg.dbscan_eps_mm), cortex_center_iso_mask)
+
+
+def _cluster_track_centers_calibrated(
+    metrics: pd.DataFrame,
+    cfg: Step5Config,
+    cortex_center_iso_mask: np.ndarray | None = None,
+) -> tuple[pd.DataFrame, float, dict[str, Any]]:
+    """自动选择 DBSCAN 半径，使健康样例计数尽量接近目标且避免低于下限。"""
+
+    if metrics.empty:
+        return _cluster_track_centers_with_eps(metrics, cfg, float(cfg.dbscan_eps_mm), cortex_center_iso_mask), float(cfg.dbscan_eps_mm), {
+            "enabled": bool(cfg.calibration_enabled),
+            "reason": "no_candidate_tracks",
+            "candidate_tracks": 0,
+        }
+
+    if not cfg.calibration_enabled:
+        result = _cluster_track_centers_with_eps(metrics, cfg, float(cfg.dbscan_eps_mm), cortex_center_iso_mask)
+        return result, float(cfg.dbscan_eps_mm), {
+            "enabled": False,
+            "reason": "disabled",
+            "candidate_tracks": int(len(metrics)),
+            "selected_count": int(len(result)),
+        }
+
+    eps_values = np.linspace(
+        float(cfg.dbscan_eps_min_mm),
+        float(cfg.dbscan_eps_max_mm),
+        max(2, int(cfg.dbscan_eps_steps)),
+    )
+    best_eps = float(cfg.dbscan_eps_mm)
+    best_result = _cluster_track_centers_with_eps(metrics, cfg, best_eps, cortex_center_iso_mask)
+    best_score = _calibration_score(int(len(best_result)), cfg)
+    counts: list[dict[str, float | int]] = []
+    for eps in eps_values:
+        result = _cluster_track_centers_with_eps(metrics, cfg, float(eps), cortex_center_iso_mask)
+        count = int(len(result))
+        counts.append({"eps_mm": float(eps), "count": count})
+        score = _calibration_score(count, cfg)
+        if score < best_score:
+            best_eps = float(eps)
+            best_result = result
+            best_score = score
+
+    selected_count = int(len(best_result))
+    return best_result, best_eps, {
+        "enabled": True,
+        "candidate_tracks": int(len(metrics)),
+        "target_count": int(cfg.calibration_target_count),
+        "min_count": int(cfg.calibration_min_count),
+        "eps_min_mm": float(cfg.dbscan_eps_min_mm),
+        "eps_max_mm": float(cfg.dbscan_eps_max_mm),
+        "eps_steps": int(cfg.dbscan_eps_steps),
+        "selected_eps_mm": best_eps,
+        "selected_count": selected_count,
+        "count_at_default_eps": int(len(_cluster_track_centers_with_eps(metrics, cfg, float(cfg.dbscan_eps_mm), cortex_center_iso_mask))),
+        "sampled_counts": counts,
+    }
+
+
+def _calibration_score(count: int, cfg: Step5Config) -> tuple[int, int]:
+    """给候选计数打分；优先不低于下限，其次接近目标 450。"""
+
+    below_penalty = max(0, int(cfg.calibration_min_count) - int(count))
+    return below_penalty, abs(int(count) - int(cfg.calibration_target_count))
+
+
+def _cluster_track_centers_with_eps(
+    metrics: pd.DataFrame,
+    cfg: Step5Config,
+    eps_mm: float,
+    cortex_center_iso_mask: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """用指定 eps 在 mm 坐标下对 track-level centers 做 DBSCAN 聚类。"""
 
     columns = [
         "glomerulus_id",
@@ -646,7 +771,7 @@ def _cluster_track_centers(metrics: pd.DataFrame, cfg: Step5Config) -> pd.DataFr
         return pd.DataFrame(columns=columns)
 
     coords = metrics[["center_x_mm", "center_y_mm"]].to_numpy(dtype=float)
-    labels = DBSCAN(eps=cfg.dbscan_eps_mm, min_samples=cfg.dbscan_min_samples).fit_predict(coords)
+    labels = DBSCAN(eps=float(eps_mm), min_samples=cfg.dbscan_min_samples).fit_predict(coords)
     rows: list[dict[str, Any]] = []
     glomerulus_id = 0
     for label in sorted(set(labels)):
@@ -669,13 +794,39 @@ def _cluster_track_centers(metrics: pd.DataFrame, cfg: Step5Config) -> pd.DataFr
                 "median_speed_mm_s": float(np.median(cluster["mean_speed_mm_s"])),
             }
         )
-    return pd.DataFrame(rows, columns=columns)
+    result = pd.DataFrame(rows, columns=columns)
+    return _filter_glomeruli_by_strict_cortex(result, cfg, cortex_center_iso_mask)
+
+
+def _filter_glomeruli_by_strict_cortex(
+    glomeruli: pd.DataFrame,
+    cfg: Step5Config,
+    cortex_center_iso_mask: np.ndarray | None,
+) -> pd.DataFrame:
+    """删除完整肾小球圆盘会越出 cortex 的最终聚类中心。"""
+
+    if cortex_center_iso_mask is None or glomeruli.empty:
+        return glomeruli
+    x = np.clip(
+        np.rint(glomeruli["center_x_mm"].to_numpy(dtype=float) / cfg.iso_spacing_mm).astype(int),
+        0,
+        cortex_center_iso_mask.shape[1] - 1,
+    )
+    y = np.clip(
+        np.rint(glomeruli["center_y_mm"].to_numpy(dtype=float) / cfg.iso_spacing_mm).astype(int),
+        0,
+        cortex_center_iso_mask.shape[0] - 1,
+    )
+    kept = glomeruli[cortex_center_iso_mask[y, x]].copy()
+    kept["glomerulus_id"] = np.arange(1, len(kept) + 1, dtype=int)
+    return kept.reset_index(drop=True)
 
 
 def _per_block_counts(
     metrics: pd.DataFrame,
     selected_metrics: pd.DataFrame,
     cfg: Step5Config,
+    cortex_center_iso_mask: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """逐 block 单独 DBSCAN 计数，便于检查跨 block 聚合前的结果。"""
 
@@ -686,7 +837,7 @@ def _per_block_counts(
         rows.append(
             {
                 "block_id": int(block_id),
-                "glomeruli_count": int(len(_cluster_track_centers(block_selected, cfg))),
+                "glomeruli_count": int(len(_cluster_track_centers(block_selected, cfg, cortex_center_iso_mask))),
                 "n_slow_tracks": int(len(block_all)),
                 "n_glomerular_tracks": int(len(block_selected)),
             }
@@ -726,6 +877,7 @@ def _write_outputs(
     glomerular_mask_iso: np.ndarray,
     fast_vessel_mask_iso: np.ndarray,
     cortex_iso_mask: np.ndarray,
+    cortex_center_iso_mask: np.ndarray,
     exclude_iso_mask: np.ndarray,
 ) -> None:
     """保存 CSV、NPY 和配置快照。"""
@@ -740,6 +892,7 @@ def _write_outputs(
     np.save(output_dir / "glomerular_mask_iso.npy", glomerular_mask_iso)
     np.save(output_dir / "fast_vessel_mask_iso.npy", fast_vessel_mask_iso)
     np.save(output_dir / "cortex_mask_iso.npy", cortex_iso_mask)
+    np.save(output_dir / "cortex_center_mask_iso.npy", cortex_center_iso_mask)
     np.save(output_dir / "exclude_mask_iso.npy", exclude_iso_mask)
     _save_summary(output_dir / "config.json", asdict(cfg))
 
@@ -913,6 +1066,7 @@ def _save_visualizations(
     glomerular_mask_iso: np.ndarray,
     seed_mask_iso: np.ndarray,
     fast_vessel_mask_iso: np.ndarray,
+    cortex_center_iso_mask: np.ndarray,
     nd_map_iso: np.ndarray,
     metrics: pd.DataFrame,
     selected_metrics: pd.DataFrame,
@@ -925,6 +1079,7 @@ def _save_visualizations(
     glom_original = _mask_iso_to_original(glomerular_mask_iso, original_shape, cfg)
     seed_original = _mask_iso_to_original(seed_mask_iso, original_shape, cfg)
     fast_mask_original = _mask_iso_to_original(fast_vessel_mask_iso, original_shape, cfg)
+    cortex_center_original = _mask_iso_to_original(cortex_center_iso_mask, original_shape, cfg)
 
     _plot_overlay(
         output_dir / "slow_density_overlay_cortex.png",
@@ -936,7 +1091,11 @@ def _save_visualizations(
     _plot_overlay(
         output_dir / "glomerular_mask_overlay.png",
         slow_bg,
-        contours=[(glom_original, "lime", "glomerular mask"), (seed_original, "yellow", "seeds")],
+        contours=[
+            (glom_original, "lime", "glomerular mask"),
+            (seed_original, "yellow", "seeds"),
+            (cortex_center_original, "magenta", "strict cortex center"),
+        ],
         title="Glomerular mask and candidate seeds",
     )
     _plot_centers(output_dir / "final_glomeruli_centers.png", slow_bg, final_glomeruli, cfg, "glomeruli")
@@ -1158,7 +1317,6 @@ def _save_mask_overlay(image: np.ndarray, mask: np.ndarray, path: str | Path, mo
 
 
 def run_step5_from_cli_defaults(
-    label: str | None = DEFAULT_EXEC_LABEL,
     base_dir: str | Path = "human_dcm",
     masks_dir: str | Path = "masks",
     step04_dir: str | Path | None = None,
@@ -1169,13 +1327,13 @@ def run_step5_from_cli_defaults(
     fast_density: str | Path | None = None,
     cortex_mask: str | Path | None = None,
     exclude_mask: str | Path | None = None,
+    step5_config: dict[str, Any] | Step5Config | None = None,
 ) -> dict[str, Any]:
     """按 Human pipeline 默认目录运行 Step05 计数。"""
 
     base_path = Path(base_dir)
-    label = label or DEFAULT_EXEC_LABEL
-    step04_path = Path(step04_dir) if step04_dir is not None else base_path / "step04_density_metrics" / label
-    output_path = Path(output_dir) if output_dir is not None else base_path / "step05_glomeruli_count" / label
+    step04_path = Path(step04_dir) if step04_dir is not None else base_path / "step04_density_metrics"
+    output_path = Path(output_dir) if output_dir is not None else base_path / "step05_glomeruli_count"
     masks_path = Path(masks_dir)
 
     slow_tracks_path = Path(slow_tracks) if slow_tracks is not None else step04_path / "human_slow_tracks.csv"
@@ -1192,10 +1350,10 @@ def run_step5_from_cli_defaults(
         fast_density=_load_array(fast_density_path),
         cortex_mask=_load_array(cortex_mask_path),
         exclude_mask=_load_array(exclude_mask_path),
+        config=step5_config,
         output_dir=output_path,
     )
 
-    print(f"label: {label}")
     print(f"step04_dir: {step04_path}")
     print(f"output_dir: {output_path}")
     print(f"summary: {output_path / 'summary.json'}")
@@ -1210,10 +1368,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Step 5 mask drawing or glomeruli counting")
     parser.add_argument("--mode", choices=["cortex", "exclude", "exec"], required=True, help="cortex/exclude 画 mask；exec 运行 Step05 计数")
-    parser.add_argument("--image", help=f"画 mask 模式使用：背景图像；默认读取 {DEFAULT_EXEC_LABEL} 的 human_density_slow.png")
+    parser.add_argument("--image", help="画 mask 模式使用：背景图像；默认读取当前 Step04 的 human_density_slow.png")
     parser.add_argument("--output", help="画 mask 模式使用：覆盖默认 bool mask npy 路径")
     parser.add_argument("--overlay", help="画 mask 模式使用：覆盖默认 overlay PNG 路径")
-    parser.add_argument("--label", default=DEFAULT_EXEC_LABEL, help=f"exec 模式使用：Human pipeline 输出 label；默认 {DEFAULT_EXEC_LABEL}")
     parser.add_argument("--base-dir", type=Path, default=DEFAULT_BASE_DIR, help="Human 输出根目录")
     parser.add_argument("--masks-dir", type=Path, default=DEFAULT_MASKS_DIR, help="默认 mask 目录")
     parser.add_argument("--step04-dir", type=Path, default=None, help="exec 模式使用：覆盖 Step04 输入目录")
@@ -1224,21 +1381,28 @@ def main() -> None:
     parser.add_argument("--fast-density", type=Path, default=None, help="exec 模式使用：覆盖 rapid/fast density 图像或 npy")
     parser.add_argument("--cortex-mask", type=Path, default=None, help="exec 模式使用：覆盖 cortex_mask.npy")
     parser.add_argument("--exclude-mask", type=Path, default=None, help="exec 模式使用：覆盖 exclude_mask.npy")
+    parser.add_argument(
+        "--count-mode",
+        choices=["healthy_calibration", "diagnostic"],
+        default="healthy_calibration",
+        help="healthy_calibration 会自动扫 eps 靠近健康目标；diagnostic 使用固定 eps，不把病肾强行拉到 400+。",
+    )
+    parser.add_argument("--dbscan-eps-mm", type=float, default=None, help="diagnostic 或手工复现实验使用的固定 DBSCAN eps。")
     args = parser.parse_args()
 
     if args.mode in {"cortex", "exclude"}:
         image_path = (
             Path(args.image)
             if args.image is not None
-            else args.base_dir / "step04_density_metrics" / args.label / "human_density_slow.png"
+            else args.base_dir / "step04_density_metrics" / "human_density_slow.png"
         )
         output_path = Path(args.output) if args.output is not None else args.masks_dir / f"{args.mode}_mask.npy"
         overlay_path = Path(args.overlay) if args.overlay is not None else args.masks_dir / f"{args.mode}_mask_overlay.png"
         draw_mask_from_image(image_path, output_path, overlay_path, args.mode)
         return
 
+    step5_config = _config_from_cli(args.count_mode, args.dbscan_eps_mm)
     run_step5_from_cli_defaults(
-        label=args.label,
         base_dir=args.base_dir,
         masks_dir=args.masks_dir,
         step04_dir=args.step04_dir,
@@ -1249,7 +1413,19 @@ def main() -> None:
         fast_density=args.fast_density,
         cortex_mask=args.cortex_mask,
         exclude_mask=args.exclude_mask,
+        step5_config=step5_config,
     )
+
+
+def _config_from_cli(count_mode: str, dbscan_eps_mm: float | None) -> dict[str, Any]:
+    """把 CLI 的计数模式转换成 Step5Config 覆盖项。"""
+
+    config_override: dict[str, Any] = {}
+    if count_mode == "diagnostic":
+        config_override["calibration_enabled"] = False
+    if dbscan_eps_mm is not None:
+        config_override["dbscan_eps_mm"] = float(dbscan_eps_mm)
+    return config_override
 
 
 if __name__ == "__main__":
