@@ -23,9 +23,8 @@ env/
 human_dcm/
 mouse_dcm/
 output/
-all_masks/
 
-# Extracted or temporary document artifacts
+# all_masks/ 只排除 DCM 文件（*.dcm 已全局生效），其他 mask/png/json 全部纳入版本管理
 masks/
 archive/healthy_step05_runs/
 archive/healthy_common_step05_params.json

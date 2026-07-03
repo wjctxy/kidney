@@ -67,6 +67,7 @@ def calibrate(
             "calibration_enabled": False,
             "dbscan_eps_mm": float(above_min_best["eps_mm"]),
             "exclude_inside_frac_max": _common_value(summaries, "exclude_inside_frac_max"),
+            "cortex_edge_relaxation_mm": _common_value(summaries, "cortex_edge_relaxation_mm", 0.025),
         },
         "eps_table": table,
     }
@@ -143,14 +144,18 @@ def choose_balanced_eps(table: list[dict[str, Any]], min_count: int, max_count: 
     return min(table, key=score)
 
 
-def _common_value(summaries: dict[str, dict[str, Any]], key: str) -> Any:
+def _common_value(summaries: dict[str, dict[str, Any]], key: str, default: Any = None) -> Any:
     """如果所有 summary 的某个字段一致，则返回该值，否则返回逐样本字典。"""
 
     values = {sample_id: _summary_value(summary, key) for sample_id, summary in summaries.items()}
-    unique = set(json.dumps(value, sort_keys=True) for value in values.values())
+    # 如果所有样本都没有该字段，返回默认值
+    defined = {k: v for k, v in values.items() if v is not None}
+    if not defined:
+        return default
+    unique = set(json.dumps(value, sort_keys=True) for value in defined.values())
     if len(unique) == 1:
-        return next(iter(values.values()))
-    return values
+        return next(iter(defined.values()))
+    return {sample_id: defined.get(sample_id, default) for sample_id in summaries}
 
 
 def _sampled_counts(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -180,9 +185,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calibrate common Step05 params from healthy samples")
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--min-count", type=int, default=400)
-    parser.add_argument("--max-count", type=int, default=600)
-    parser.add_argument("--target-count", type=int, default=450)
+    parser.add_argument("--min-count", type=int, default=280)
+    parser.add_argument("--max-count", type=int, default=400)
+    parser.add_argument("--target-count", type=int, default=320)
     return parser.parse_args()
 
 

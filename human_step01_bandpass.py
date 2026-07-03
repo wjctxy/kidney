@@ -16,7 +16,7 @@ Output:
 算法说明:
     支持 Akebia human 的 Rapid/Slow 两套 profile。
     Rapid 使用一阶 Butterworth 因果带通：butter(order=1) + lfilter，[1, 5.5] Hz。
-    Slow 对应 Akebia human useBandpass=false，不做时域带通，直接传递 Step0 帧。
+    Slow 使用低频带通 [0.05, 1.0] Hz，去掉静态显示结构后保留慢速增强变化。
 """
 
 from __future__ import annotations
@@ -181,7 +181,7 @@ def run(
         "highcut": float(config.HUMAN_PROFILES[profile]["bandpass_high_hz"]),
         "filter_order": int(config.HUMAN_PROFILES[profile]["bandpass_order"]),
         "filter_method": "butterworth_causal_lfilter" if config.HUMAN_PROFILES[profile]["use_bandpass"] else "none",
-        "akebia_reference": "akebia_human Rapid uses bandpass [1, 5.5] Hz; Slow uses useBandpass=false",
+        "profile_reference": "Rapid uses bandpass [1, 5.5] Hz; Slow uses low-frequency bandpass [0.05, 1.0] Hz",
         "n_frames": int(n_frames),
     }
     with stats_path.open("w", encoding="utf-8") as f:  # 保存统计 JSON

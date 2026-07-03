@@ -55,6 +55,7 @@ def detect_frame(
     smooth_guide: np.ndarray,
     frame_id: int,
     metadata: dict,
+    detection_mask: np.ndarray | None = None,
 ) -> list[dict[str, float | int | str]]:
     """用平滑帧找峰位置，再用原始 bandpass 帧取强度并筛选。
 
@@ -74,6 +75,8 @@ def detect_frame(
 
     rows: list[dict[str, float | int | str]] = []
     for y, x in peaks:
+        if detection_mask is not None and not detection_mask[y, x]:
+            continue
         if response[y, x] < threshold:
             continue
         rows.append(
@@ -99,6 +102,7 @@ def detect_bubbles(
     output_csv: Path,
     output_dir: Path,
     preview_frame: int = DEFAULT_PREVIEW_FRAME,
+    detection_mask: np.ndarray | None = None,
 ) -> Path:
     """读取 bandpass 帧和平滑 guide，写出 Akebia human 式检测 CSV 和预览图。"""
 
@@ -106,10 +110,12 @@ def detect_bubbles(
     smooth_frames = ulm_io.load_frames(smooth_frames_path)
     if smooth_frames.shape != frames.shape:
         raise ValueError(f"smooth guide shape {smooth_frames.shape} must match frames shape {frames.shape}")
+    if detection_mask is not None and detection_mask.shape != frames.shape[1:]:
+        raise ValueError(f"detection_mask shape {detection_mask.shape} must match frame shape {frames.shape[1:]}")
 
     detections_csv, detection_count = write_frame_detections(
         frames.shape[0],
-        lambda frame_id: detect_frame(frames[frame_id], smooth_frames[frame_id], frame_id, metadata),
+        lambda frame_id: detect_frame(frames[frame_id], smooth_frames[frame_id], frame_id, metadata, detection_mask),
         output_csv,
         desc="human detection",
     )
@@ -164,6 +170,7 @@ def run(
     output_dir: Path | None = None,
     preview_frame: int = DEFAULT_PREVIEW_FRAME,
     profile: str = "rapid",
+    detection_mask: np.ndarray | None = None,
 ) -> dict[str, Path]:
     """运行 Human Step 03：Akebia human 式检测后进行匈牙利轨迹追踪。"""
 
@@ -183,6 +190,7 @@ def run(
         output_dir / "human_detections.csv",
         output_dir,
         preview_frame,
+        detection_mask=detection_mask,
     )
     profile_params = config.HUMAN_PROFILES[profile]
     tracks_csv = track_detections(
@@ -211,9 +219,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--preview-frame", type=int, default=DEFAULT_PREVIEW_FRAME)
     parser.add_argument("--profile", choices=sorted(config.HUMAN_PROFILES), default="rapid")
+    parser.add_argument("--detection-mask", type=Path, default=None, help="可选 bool npy；只在 mask 内保留 detections。")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run(args.frames, args.smooth_frames, args.metadata, args.output_dir, args.preview_frame, args.profile)
+    mask = np.load(args.detection_mask).astype(bool) if args.detection_mask is not None else None
+    run(args.frames, args.smooth_frames, args.metadata, args.output_dir, args.preview_frame, args.profile, detection_mask=mask)

@@ -59,10 +59,11 @@ class Step5Config:
     max_component_area_factor: float = 8.0
     cortex_inside_frac_min: float = 0.50
     exclude_inside_frac_max: float = 0.25
+    cortex_edge_relaxation_mm: float = 0.025
     distribution_super_res_factor: int = 4
     distribution_gaussian_sigma_px: float = 4.8
-    calibration_target_count: int = 450
-    calibration_min_count: int = 400
+    calibration_target_count: int = 320
+    calibration_min_count: int = 280
 
 
 def run_step5_glomeruli_count(
@@ -199,9 +200,9 @@ def run_step5_glomeruli_count(
         "calibration_min_count": int(cfg.calibration_min_count),
         "calibration_info": calibration_info,
         "calibration_note": (
-            "single candidate set calibrated toward expected CT slice glomerulus count around 450; masks are unchanged"
+            "single candidate set calibrated toward expected CT slice glomerulus count around 320; masks are unchanged"
             if cfg.calibration_enabled
-            else "diagnostic fixed-eps mode; count is not forced toward the healthy 400-450 range"
+            else "diagnostic fixed-eps mode; count is not forced toward the healthy 280-320 range"
         ),
         "warnings": warnings_list,
     }
@@ -440,12 +441,21 @@ def _mask_iso_to_original(mask_iso: np.ndarray, original_shape: tuple[int, int],
 
 
 def _strict_cortex_center_mask_iso(cortex_iso_mask: np.ndarray, cfg: Step5Config) -> np.ndarray:
-    """生成严格 cortex 中心 mask：中心在此处时，完整肾小球圆盘不会越出 cortex。"""
+    """生成 cortex 中心 mask：允许肾小球圆盘部分越出皮质边缘。
 
-    radius_px = int(math.ceil(float(cfg.glomerulus_radius_mm) / max(float(cfg.iso_spacing_mm), 1e-12)))
-    if radius_px <= 0:
+    肾小球天然贴着肾皮质边缘生长，完全严格的 containment 会误杀大量
+    边缘肾小球。cortex_edge_relaxation_mm 控制边缘松弛量：
+    - 0 表示完全严格（完整肾小球圆盘必须在皮质内）
+    - glomerulus_radius_mm 表示完全不限制（中心只需在皮质内即可）
+    默认值为半半径，允许肾小球约一半体积超出皮质边缘。
+    """
+
+    full_radius_px = int(math.ceil(float(cfg.glomerulus_radius_mm) / max(float(cfg.iso_spacing_mm), 1e-12)))
+    relaxation_px = int(math.floor(float(cfg.cortex_edge_relaxation_mm) / max(float(cfg.iso_spacing_mm), 1e-12)))
+    erosion_px = max(0, full_radius_px - relaxation_px)
+    if erosion_px <= 0:
         return cortex_iso_mask.astype(bool, copy=True)
-    disk = morphology.disk(radius_px)
+    disk = morphology.disk(erosion_px)
     return morphology.erosion(cortex_iso_mask.astype(bool), disk).astype(bool)
 
 
@@ -742,7 +752,7 @@ def _cluster_track_centers_calibrated(
 
 
 def _calibration_score(count: int, cfg: Step5Config) -> tuple[int, int]:
-    """给候选计数打分；优先不低于下限，其次接近目标 450。"""
+    """给候选计数打分；优先不低于下限，其次接近目标 320。"""
 
     below_penalty = max(0, int(cfg.calibration_min_count) - int(count))
     return below_penalty, abs(int(count) - int(cfg.calibration_target_count))

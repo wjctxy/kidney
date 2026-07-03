@@ -40,7 +40,7 @@ HUMAN_PROFILES = {
         "max_gap_closing_frames": 0,
     },
     "slow": {
-        "use_bandpass": False,
+        "use_bandpass": True,
         "bandpass_low_hz": 0.05,
         "bandpass_high_hz": 1.0,
         "bandpass_order": 1,

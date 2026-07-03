@@ -40,7 +40,12 @@ all_masks/
     exclude_mask.log.json
 ```
 
-如果缺 `cortex_mask.npy` 或 `exclude_mask.npy`，全流程会先跑到 Step04，用慢速密度图进入交互式 mask 绘制；保存后默认重新从 Step00 开始，用 cortex 内 TIC 选最终帧段。
+`--run-full-pipeline` 要求样本目录里已经有 `cortex_mask.npy` 和 `exclude_mask.npy`。如果缺 mask，
+先运行 `--mask-only` 交互式重画/生成 mask；全流程入口不会自动画 mask，也不会重跑 Step00。
+
+`--mask-only` 的 Step00 选帧保持稳定窗口优先，目的是生成可画 mask 的背景图。`--run-full-pipeline`
+会在已有 cortex mask 下启用高增强 TIC 约束，窗口均值必须达到 baseline 到 peak 增强幅度的
+45% 以上，再在候选窗口里选更稳定的一段，避免选到微泡已经很少的稳定尾段。
 
 ## Step00
 
@@ -54,14 +59,14 @@ all_masks/
 默认设置在 `step00_preprocess.py` 顶部：
 
 ```text
-DEFAULT_TARGET_FRAMES = 200
-DEFAULT_MIN_FRAMES = 200
+DEFAULT_TARGET_FRAMES = 401
+DEFAULT_MIN_FRAMES = 1
 DEFAULT_SMOOTH_WINDOW = 15
 DEFAULT_BASELINE_SECONDS = 2.0
 DEFAULT_MIN_ENHANCEMENT = 0.01
 ```
 
-Step00 会先读取完整 DICOM 并计算 TIC(time-intensity curve)。有 cortex mask 时，TIC 是 cortex 内平均 CEUS score；没有 mask 时，TIC 退回完整 ROI 平均值。默认选择 200 帧连续稳定窗口，不再默认取前 600 帧，也不按总帧数比例取帧。
+普通 Step00 和 mask-only 默认按 `--start-frame/--frame-count` 手动截取；`--run-full-pipeline` 且已有 cortex mask 时才计算 cortex TIC，并以亮度峰值为中心保存默认 401 帧。没有 cortex mask 时不再退回完整 ROI TIC。
 
 输出：
 
@@ -83,7 +88,7 @@ Rapid/slow 参数定义在 `ulm_config.py` 的 `HUMAN_PROFILES`：
 
 ```text
 rapid: bandpass [1.0, 5.5] Hz, max displacement 15 px/frame, min length 5
-slow:  no bandpass, max displacement 4 px/frame,  min length 10
+slow:  bandpass [0.05, 1.0] Hz, max displacement 4 px/frame, min length 10
 ```
 
 Step04 主要输出：
@@ -162,14 +167,16 @@ archive/healthy_step05_runs/<sample_id>_summary.json
 多个健康样本跑完后统计公共诊断参数：
 
 ```bash
-.venv/bin/python calibrate_healthy_step05_params.py
+.venv/bin/python step00_preprocess.py --summarize-healthy-runs
 ```
 
 输出：
 
 ```text
-archive/healthy_common_step05_params.json
+archive/healthy_step05_runs/global_arguments.json
 ```
+
+该汇总会在所有样本的 `sampled_counts` 上搜索公共 `dbscan_eps_mm`：优先保证每个健康样本全局计数不低于 400，再用软上限、PCA target-distance 和离散度避免计数过高。
 
 ## 文档索引
 

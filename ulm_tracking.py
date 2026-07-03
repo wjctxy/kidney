@@ -764,7 +764,7 @@ def _write_profile_summary(
         f"rapid_profile_tracks: {len(rapid_rows)}",
         f"slow_profile_tracks: {len(slow_rows)}",
         "rapid_profile_definition: Akebia human Rapid parameters, bandpass [1, 5.5] Hz, maxLinkingDistance=15, minLength=5",
-        "slow_profile_definition: Akebia human Slow parameters, no bandpass, maxLinkingDistance=4, minLength=10",
+        "slow_profile_definition: Human Slow parameters, bandpass [0.05, 1.0] Hz with cortex-limited detections when a cortex mask is available, maxLinkingDistance=4, minLength=10",
         f"rapid_mean_displacement_px_per_frame: {_mean(rapid_rows, 'mean_displacement_px_per_frame'):.6f}",
         f"slow_mean_displacement_px_per_frame: {_mean(slow_rows, 'mean_displacement_px_per_frame'):.6f}",
         f"rapid_mean_velocity: {_mean(rapid_rows, 'mean_velocity'):.6f}",

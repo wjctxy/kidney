@@ -1,0 +1,355 @@
+{
+  "total_slow_tracks": 841,
+  "tracks_after_cortex_filter": 841,
+  "tracks_after_exclusion_filter": 814,
+  "tracks_after_strict_cortex_center_filter": 800,
+  "tracks_after_fast_vessel_filter": 776,
+  "glomerular_tracks": 776,
+  "glomeruli_count": 314,
+  "iso_spacing_mm": 0.02,
+  "glomerulus_radius_mm": 0.05,
+  "radius_iso_px": 2.5,
+  "dbscan_eps_mm": 0.20455696202531645,
+  "dbscan_eps_default_mm": 0.17,
+  "dbscan_min_samples": 1,
+  "exclude_inside_frac_max": 0.25,
+  "strict_cortex_containment": "final glomerulus centers must lie inside cortex eroded by glomerulus_radius_mm, so the full glomerulus disk stays within cortex",
+  "calibration_target_count": 320,
+  "calibration_min_count": 280,
+  "calibration_info": {
+    "enabled": true,
+    "candidate_tracks": 776,
+    "target_count": 320,
+    "min_count": 280,
+    "eps_min_mm": 0.04,
+    "eps_max_mm": 0.3,
+    "eps_steps": 80,
+    "selected_eps_mm": 0.20455696202531645,
+    "selected_count": 314,
+    "count_at_default_eps": 375,
+    "sampled_counts": [
+      {
+        "eps_mm": 0.04,
+        "count": 739
+      },
+      {
+        "eps_mm": 0.04329113924050633,
+        "count": 736
+      },
+      {
+        "eps_mm": 0.04658227848101266,
+        "count": 736
+      },
+      {
+        "eps_mm": 0.04987341772151899,
+        "count": 703
+      },
+      {
+        "eps_mm": 0.053164556962025315,
+        "count": 703
+      },
+      {
+        "eps_mm": 0.056455696202531644,
+        "count": 703
+      },
+      {
+        "eps_mm": 0.05974683544303798,
+        "count": 703
+      },
+      {
+        "eps_mm": 0.0630379746835443,
+        "count": 697
+      },
+      {
+        "eps_mm": 0.06632911392405064,
+        "count": 697
+      },
+      {
+        "eps_mm": 0.06962025316455696,
+        "count": 697
+      },
+      {
+        "eps_mm": 0.0729113924050633,
+        "count": 692
+      },
+      {
+        "eps_mm": 0.07620253164556962,
+        "count": 692
+      },
+      {
+        "eps_mm": 0.07949367088607595,
+        "count": 692
+      },
+      {
+        "eps_mm": 0.08278481012658229,
+        "count": 649
+      },
+      {
+        "eps_mm": 0.08607594936708861,
+        "count": 644
+      },
+      {
+        "eps_mm": 0.08936708860759493,
+        "count": 644
+      },
+      {
+        "eps_mm": 0.09265822784810127,
+        "count": 644
+      },
+      {
+        "eps_mm": 0.0959493670886076,
+        "count": 543
+      },
+      {
+        "eps_mm": 0.09924050632911392,
+        "count": 543
+      },
+      {
+        "eps_mm": 0.10253164556962024,
+        "count": 535
+      },
+      {
+        "eps_mm": 0.10582278481012658,
+        "count": 535
+      },
+      {
+        "eps_mm": 0.10911392405063292,
+        "count": 532
+      },
+      {
+        "eps_mm": 0.11240506329113925,
+        "count": 532
+      },
+      {
+        "eps_mm": 0.11569620253164556,
+        "count": 532
+      },
+      {
+        "eps_mm": 0.1189873417721519,
+        "count": 531
+      },
+      {
+        "eps_mm": 0.12227848101265823,
+        "count": 525
+      },
+      {
+        "eps_mm": 0.12556962025316457,
+        "count": 495
+      },
+      {
+        "eps_mm": 0.12886075949367087,
+        "count": 495
+      },
+      {
+        "eps_mm": 0.1321518987341772,
+        "count": 486
+      },
+      {
+        "eps_mm": 0.13544303797468354,
+        "count": 486
+      },
+      {
+        "eps_mm": 0.13873417721518988,
+        "count": 486
+      },
+      {
+        "eps_mm": 0.1420253164556962,
+        "count": 466
+      },
+      {
+        "eps_mm": 0.14531645569620252,
+        "count": 464
+      },
+      {
+        "eps_mm": 0.14860759493670886,
+        "count": 460
+      },
+      {
+        "eps_mm": 0.1518987341772152,
+        "count": 460
+      },
+      {
+        "eps_mm": 0.15518987341772153,
+        "count": 455
+      },
+      {
+        "eps_mm": 0.15848101265822784,
+        "count": 455
+      },
+      {
+        "eps_mm": 0.16177215189873417,
+        "count": 437
+      },
+      {
+        "eps_mm": 0.1650632911392405,
+        "count": 407
+      },
+      {
+        "eps_mm": 0.16835443037974684,
+        "count": 375
+      },
+      {
+        "eps_mm": 0.17164556962025318,
+        "count": 375
+      },
+      {
+        "eps_mm": 0.1749367088607595,
+        "count": 375
+      },
+      {
+        "eps_mm": 0.17822784810126582,
+        "count": 375
+      },
+      {
+        "eps_mm": 0.18151898734177216,
+        "count": 375
+      },
+      {
+        "eps_mm": 0.1848101265822785,
+        "count": 372
+      },
+      {
+        "eps_mm": 0.1881012658227848,
+        "count": 340
+      },
+      {
+        "eps_mm": 0.19139240506329114,
+        "count": 340
+      },
+      {
+        "eps_mm": 0.19468354430379747,
+        "count": 336
+      },
+      {
+        "eps_mm": 0.1979746835443038,
+        "count": 336
+      },
+      {
+        "eps_mm": 0.20126582278481014,
+        "count": 332
+      },
+      {
+        "eps_mm": 0.20455696202531645,
+        "count": 314
+      },
+      {
+        "eps_mm": 0.2078481012658228,
+        "count": 309
+      },
+      {
+        "eps_mm": 0.21113924050632912,
+        "count": 309
+      },
+      {
+        "eps_mm": 0.21443037974683546,
+        "count": 286
+      },
+      {
+        "eps_mm": 0.21772151898734177,
+        "count": 285
+      },
+      {
+        "eps_mm": 0.2210126582278481,
+        "count": 278
+      },
+      {
+        "eps_mm": 0.22430379746835444,
+        "count": 274
+      },
+      {
+        "eps_mm": 0.22759493670886077,
+        "count": 272
+      },
+      {
+        "eps_mm": 0.23088607594936708,
+        "count": 268
+      },
+      {
+        "eps_mm": 0.23417721518987342,
+        "count": 266
+      },
+      {
+        "eps_mm": 0.23746835443037975,
+        "count": 258
+      },
+      {
+        "eps_mm": 0.2407594936708861,
+        "count": 242
+      },
+      {
+        "eps_mm": 0.2440506329113924,
+        "count": 237
+      },
+      {
+        "eps_mm": 0.24734177215189873,
+        "count": 201
+      },
+      {
+        "eps_mm": 0.25063291139240507,
+        "count": 184
+      },
+      {
+        "eps_mm": 0.2539240506329114,
+        "count": 184
+      },
+      {
+        "eps_mm": 0.25721518987341774,
+        "count": 184
+      },
+      {
+        "eps_mm": 0.260506329113924,
+        "count": 173
+      },
+      {
+        "eps_mm": 0.26379746835443035,
+        "count": 173
+      },
+      {
+        "eps_mm": 0.2670886075949367,
+        "count": 172
+      },
+      {
+        "eps_mm": 0.270379746835443,
+        "count": 172
+      },
+      {
+        "eps_mm": 0.27367088607594936,
+        "count": 171
+      },
+      {
+        "eps_mm": 0.2769620253164557,
+        "count": 170
+      },
+      {
+        "eps_mm": 0.28025316455696203,
+        "count": 159
+      },
+      {
+        "eps_mm": 0.28354430379746837,
+        "count": 151
+      },
+      {
+        "eps_mm": 0.28683544303797465,
+        "count": 145
+      },
+      {
+        "eps_mm": 0.290126582278481,
+        "count": 144
+      },
+      {
+        "eps_mm": 0.2934177215189873,
+        "count": 131
+      },
+      {
+        "eps_mm": 0.29670886075949365,
+        "count": 131
+      },
+      {
+        "eps_mm": 0.3,
+        "count": 131
+      }
+    ]
+  },
+  "calibration_note": "single candidate set calibrated toward expected CT slice glomerulus count around 320; masks are unchanged",
+  "warnings": []
+}

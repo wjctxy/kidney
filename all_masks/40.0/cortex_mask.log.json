@@ -1,0 +1,12 @@
+{
+  "mode": "cortex",
+  "image": "/Users/jason/Documents/Papers/kidney/human_dcm/step00_preprocess/step00_mean_projection.npy",
+  "output": "/Users/jason/Documents/Papers/kidney/all_masks/40.0/cortex_mask.npy",
+  "overlay": "/Users/jason/Documents/Papers/kidney/all_masks/40.0/cortex_mask_overlay.png",
+  "shape": [
+    438,
+    601
+  ],
+  "polygon_count": 1,
+  "mask_true_pixels": 47587
+}

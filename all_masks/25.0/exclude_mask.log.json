@@ -1,0 +1,12 @@
+{
+  "mode": "exclude",
+  "image": "/Users/jason/Documents/Papers/kidney/human_dcm/step04_density_metrics/human_density_profile_overlay.png",
+  "output": "/Users/jason/Documents/Papers/kidney/all_masks/25.0/exclude_mask.npy",
+  "overlay": "/Users/jason/Documents/Papers/kidney/all_masks/25.0/exclude_mask_overlay.png",
+  "shape": [
+    1752,
+    2404
+  ],
+  "polygon_count": 1,
+  "mask_true_pixels": 213734
+}
